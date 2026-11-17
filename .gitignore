@@ -1,0 +1,11 @@
+target/
+/workspace
+/web/node_modules
+/web/static
+/web/public
+/launcher/target
+# seaworthy.sh's work directory (the release workflow)
+/seaworthy-work
+/crates/edirstat-gui/dist
+# Downloaded raw Noto sources for the font-subsetting pipeline (scripts/fetch_fonts.sh)
+/crates/edirstat-gui/assets/fonts/raw/

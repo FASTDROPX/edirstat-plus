@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="360" viewBox="0 0 1280 360">
+<rect width="1280" height="360" rx="24" fill="#101720"/>
+<g fill="none" stroke="#263848"><rect x="790" y="42" width="434" height="276" rx="10"/><path d="M790 69H1224M1060 69V318M790 220H1060"/></g>
+<g><rect x="802" y="81" width="246" height="127" rx="4" fill="#3d91c9"/><rect x="802" y="232" width="142" height="74" rx="4" fill="#39b8b4"/><rect x="956" y="232" width="92" height="74" rx="4" fill="#5974b7"/><rect x="1072" y="81" width="140" height="136" rx="4" fill="#8a73d6"/><rect x="1072" y="229" width="140" height="77" rx="4" fill="#cc9561"/></g>
+<g font-family="Segoe UI,Arial,sans-serif"><text x="58" y="119" fill="#6fbded" font-size="18" letter-spacing="3">EXPLORE YOUR STORAGE</text><text x="54" y="201" fill="#f1f6fa" font-size="74" font-weight="700">eDirStat <tspan fill="#6fbded">Plus</tspan></text><text x="58" y="252" fill="#b4c3d0" font-size="23">Folder maps. More views. Deeper insights.</text><text x="58" y="304" fill="#8296a8" font-size="17">Rust · Windows x64 · Open source</text></g></svg>
