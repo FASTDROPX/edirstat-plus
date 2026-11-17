@@ -8,7 +8,7 @@ use crate::{
     colors,
 };
 
-const TRUNCATE_DEPTH: usize = 30000;
+const TRUNCATE_DEPTH: usize = 80000;
 const PIXEL_PRECISION_LIMIT: f32 = 0.2;
 
 pub struct TreemapBlock {
@@ -26,6 +26,10 @@ pub enum TreemapStyle {
     DiagonalGradient,
     Cushion,
     Flat,
+    Bevel,
+    Glass,
+    Neon,
+    Outline,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -44,7 +48,73 @@ pub enum MapColor {
     Age,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum MapDetail {
+    Folders,
+    #[default]
+    Files,
+}
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum MapPalette {
+    #[default]
+    Pastel,
+    Vivid,
+    Ocean,
+    Earth,
+    Mono,
+}
+
+/// Camera zoom is independent of folder navigation. Keep the point under the cursor fixed.
+fn zoom_about(
+    offset: eframe::egui::Vec2,
+    pivot: eframe::egui::Vec2,
+    old: f32,
+    new: f32,
+) -> eframe::egui::Vec2 {
+    pivot - (pivot - offset) * (new / old)
+}
+
+fn palette_color(color: Color32, palette: MapPalette) -> Color32 {
+    if palette == MapPalette::Pastel {
+        return color;
+    }
+    let mut hsv = eframe::egui::ecolor::Hsva::from(color);
+    match palette {
+        MapPalette::Pastel => {}
+        MapPalette::Vivid => {
+            hsv.s = 0.92;
+            hsv.v = 0.95;
+        }
+        MapPalette::Ocean => {
+            hsv.h = 0.45 + hsv.h * 0.22;
+            hsv.s = 0.7;
+            hsv.v = 0.85;
+        }
+        MapPalette::Earth => {
+            hsv.h *= 0.16;
+            hsv.s = 0.55;
+            hsv.v = 0.85;
+        }
+        MapPalette::Mono => {
+            hsv.s = 0.0;
+            hsv.v = 0.3 + hsv.h * 0.65;
+        }
+    }
+    Color32::from(hsv)
+}
+
 pub struct TreemapChart {
+    pub detail: MapDetail,
+    pub palette: MapPalette,
+    pub scale: f32,
+    pub target_scale: f32,
+    pub offset: eframe::egui::Vec2,
+    pub pivot: eframe::egui::Vec2,
+    pub last_detail: MapDetail,
+    pub appeared: std::collections::HashMap<u32, f64>,
+    pub delete_request: Option<u32>,
+    pub allow_fs_actions: bool,
+
     pub layout: MapLayout,
     pub coloring: MapColor,
     pub last_layout: MapLayout,
@@ -59,9 +129,25 @@ pub struct TreemapChart {
 }
 
 impl TreemapChart {
+    pub fn reset_camera(&mut self) {
+        self.scale = 1.0;
+        self.target_scale = 1.0;
+        self.offset = eframe::egui::Vec2::ZERO;
+    }
+
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
+            detail: MapDetail::Files,
+            palette: MapPalette::Pastel,
+            scale: 1.0,
+            target_scale: 1.0,
+            offset: eframe::egui::Vec2::ZERO,
+            pivot: eframe::egui::Vec2::ZERO,
+            last_detail: MapDetail::Files,
+            appeared: std::collections::HashMap::new(),
+            delete_request: None,
+            allow_fs_actions: true,
             layout: MapLayout::Folders,
             coloring: MapColor::Extension,
             last_layout: MapLayout::Folders,
@@ -102,8 +188,10 @@ impl StatsChart for TreemapChart {
         let config = TreemapConfig {
             nodes: &snapshot.nodes,
             string_pool: &snapshot.string_pool,
-            max_depth: 20,
+            max_depth: 128,
             layout: self.layout,
+            detail: self.detail,
+            clip: self.last_rect,
         };
 
         build_treemap(&config, self.zoom_root, self.last_rect, 0, &mut blocks);
@@ -176,6 +264,41 @@ impl StatComponent for TreemapChart {
             eframe::egui::Sense::click_and_drag(),
         );
 
+        if self.zoom_root != self.last_zoom_root {
+            self.reset_camera();
+        }
+        let now = ui.input(|i| i.time);
+        if response.hovered() && ui.input(|i| i.modifiers.ctrl) {
+            let zoom = ui.input(|i| i.zoom_delta());
+            if (zoom - 1.0).abs() > 0.00001 {
+                self.pivot = response.hover_pos().unwrap_or(rect.center()) - rect.min;
+                self.target_scale = (self.target_scale * zoom).clamp(1.0, 4096.0);
+            }
+        }
+        if response.dragged() && self.scale > 1.001 {
+            self.offset += response.drag_delta();
+            self.pivot += response.drag_delta();
+        }
+        let delta = self.target_scale - self.scale;
+        if delta.abs() > 0.0001 {
+            let next =
+                self.scale + delta * (1.0 - (-16.0 * ui.input(|i| i.stable_dt).min(0.05)).exp());
+            self.offset = zoom_about(self.offset, self.pivot, self.scale, next);
+            self.scale = next;
+            if (self.scale - self.target_scale).abs() < 0.001 {
+                self.offset = zoom_about(self.offset, self.pivot, self.scale, self.target_scale);
+                self.scale = self.target_scale;
+            }
+            ui.ctx().request_repaint();
+        }
+        if self.target_scale == 1.0 && self.scale == 1.0 {
+            self.offset = eframe::egui::Vec2::ZERO;
+        }
+        // Do not pan the whole map out of reach.
+        self.offset.x = self.offset.x.clamp(rect.width() * (1.0 - self.scale), 0.0);
+        self.offset.y = self.offset.y.clamp(rect.height() * (1.0 - self.scale), 0.0);
+        let map_rect = Rect::from_min_size(rect.min + self.offset, rect.size() * self.scale);
+
         // --- Layout Cache Check ---
         // Race-free (the pointer and the snapshot it identifies are the same value).
         // The rescan path always publishes a fresh `Arc`, so every content change
@@ -191,20 +314,26 @@ impl StatComponent for TreemapChart {
 
         let needs_rebuild = self.cached_blocks.is_empty()
             || snapshot_ptr != self.last_snapshot_ptr
-            || rect != self.last_rect
+            || map_rect != self.last_rect
             || self.zoom_root != self.last_zoom_root
-            || self.layout != self.last_layout;
+            || self.layout != self.last_layout
+            || self.detail != self.last_detail;
 
         if needs_rebuild {
+            if snapshot_ptr != self.last_snapshot_ptr {
+                self.context_menu_target = None;
+            }
             let mut blocks = Vec::new();
             if !snapshot.nodes.is_empty() {
                 let config = TreemapConfig {
                     nodes: &snapshot.nodes,
                     string_pool: &snapshot.string_pool,
-                    max_depth: 20,
+                    max_depth: 128,
                     layout: self.layout,
+                    detail: self.detail,
+                    clip: rect,
                 };
-                build_treemap(&config, self.zoom_root, rect, 0, &mut blocks);
+                build_treemap(&config, self.zoom_root, map_rect, 0, &mut blocks);
             }
 
             // Safety cap to prevent GPU staging buffer overflows on massive directories
@@ -212,9 +341,15 @@ impl StatComponent for TreemapChart {
                 blocks.truncate(TRUNCATE_DEPTH);
             }
 
+            let ids: std::collections::HashSet<_> = blocks.iter().map(|b| b.node_idx).collect();
+            self.appeared.retain(|id, _| ids.contains(id));
+            for b in &blocks {
+                self.appeared.entry(b.node_idx).or_insert(now);
+            }
             self.cached_blocks = blocks;
             self.last_snapshot_ptr = snapshot_ptr;
-            self.last_rect = rect;
+            self.last_rect = map_rect;
+            self.last_detail = self.detail;
             self.last_zoom_root = self.zoom_root;
             self.last_layout = self.layout;
         }
@@ -243,9 +378,14 @@ impl StatComponent for TreemapChart {
             let mut render_rect = block.rect;
             let mut draw_border = false;
 
-            if self.draw_borders && block.rect.width() > 2.0 && block.rect.height() > 2.0 {
+            if (self.draw_borders || self.detail == MapDetail::Files)
+                && block.rect.width() > 2.0
+                && block.rect.height() > 2.0
+            {
                 draw_border = true;
-                render_rect = block.rect.shrink(1.0);
+                render_rect = block
+                    .rect
+                    .shrink(if self.draw_borders { 1.0 } else { 0.35 });
             }
 
             if draw_border {
@@ -309,12 +449,47 @@ impl StatComponent for TreemapChart {
                     }
                 }
             };
+            let fade = ((now - self.appeared.get(&block.node_idx).copied().unwrap_or(now)) / 0.18)
+                .clamp(0.0, 1.0) as f32;
+            if fade < 1.0 {
+                ui.ctx().request_repaint();
+            }
+            let palette = if matches!(self.coloring, MapColor::Age | MapColor::Size) {
+                MapPalette::Pastel
+            } else {
+                self.palette
+            };
+            let fill_color = palette_color(fill_color, palette).gamma_multiply(fade);
             let color_light = scale_rgb(fill_color, 1.15);
             let color_dark = scale_rgb(fill_color, 0.75);
 
             let base_vertex_idx = combined_mesh.vertices.len() as u32;
 
             match self.style {
+                TreemapStyle::Bevel
+                | TreemapStyle::Glass
+                | TreemapStyle::Neon
+                | TreemapStyle::Outline => {
+                    let edge = render_rect.width().min(render_rect.height()).min(2.0) * 0.5;
+                    let inner = render_rect.shrink(edge);
+                    let border = if self.style == TreemapStyle::Bevel {
+                        color_light
+                    } else {
+                        fill_color
+                    };
+                    combined_mesh.add_colored_rect(render_rect, border);
+                    let center = match self.style {
+                        TreemapStyle::Neon => scale_rgb(fill_color, 0.22),
+                        TreemapStyle::Outline => Color32::from_gray(18),
+                        _ => color_dark,
+                    };
+                    combined_mesh.add_colored_rect(inner, center);
+                    if self.style == TreemapStyle::Glass {
+                        let shine =
+                            Rect::from_min_max(inner.min, pos2(inner.max.x, inner.center().y));
+                        combined_mesh.add_colored_rect(shine, color_light);
+                    }
+                }
                 TreemapStyle::Flat => combined_mesh.add_colored_rect(render_rect, fill_color),
                 TreemapStyle::VerticalGradient => {
                     combined_mesh.vertices.push(eframe::egui::epaint::Vertex {
@@ -685,6 +860,32 @@ impl StatComponent for TreemapChart {
                 if let Some(node_idx) = self.context_menu_target
                     && (node_idx as usize) < snapshot.nodes.len()
                 {
+                    #[cfg(not(target_family = "wasm"))]
+                    {
+                        if ui.button("Показать в проводнике").clicked() {
+                            let path = snapshot.get_full_path(node_idx);
+                            if let Err(error) = crate::gui::reveal::reveal_in_file_manager(
+                                std::path::Path::new(&path),
+                            ) {
+                                crate::gui::toast_error(format!(
+                                    "Не удалось открыть проводник: {error}"
+                                ));
+                            }
+                            ui.close_kind(eframe::egui::UiKind::Menu);
+                        }
+                        if ui
+                            .add_enabled(
+                                self.allow_fs_actions,
+                                eframe::egui::Button::new("Удалить…"),
+                            )
+                            .on_disabled_hover_text("Дождитесь окончания сканирования")
+                            .clicked()
+                        {
+                            self.delete_request = Some(node_idx);
+                            ui.close_kind(eframe::egui::UiKind::Menu);
+                        }
+                        ui.separator();
+                    }
                     let clicked_node = &snapshot.nodes[node_idx as usize];
                     let target = if clicked_node.is_directory() {
                         node_idx
@@ -709,6 +910,12 @@ impl StatComponent for TreemapChart {
                     }
                 }
 
+                if ui.button("Сбросить масштаб").clicked() {
+                    self.scale = 1.0;
+                    self.target_scale = 1.0;
+                    self.offset = eframe::egui::Vec2::ZERO;
+                    ui.close_kind(eframe::egui::UiKind::Menu);
+                }
                 if self.zoom_root != 0 {
                     if ui.button(t!("zoom-up-level")).clicked() {
                         let parent = snapshot
@@ -811,6 +1018,8 @@ struct TreemapConfig<'a> {
     string_pool: &'a StringPool,
     max_depth: usize,
     layout: MapLayout,
+    detail: MapDetail,
+    clip: Rect,
 }
 
 fn worst_aspect_ratio(row: &[f64], w: f64) -> f64 {
@@ -846,9 +1055,10 @@ fn recurse_child(
     depth: usize,
     blocks: &mut Vec<TreemapBlock>,
 ) {
-    const MIN_PIXEL_DIM: f32 = 12.0;
-
-    if child_rect.width() < PIXEL_PRECISION_LIMIT || child_rect.height() < PIXEL_PRECISION_LIMIT {
+    if !child_rect.intersects(config.clip)
+        || child_rect.width() < PIXEL_PRECISION_LIMIT
+        || child_rect.height() < PIXEL_PRECISION_LIMIT
+    {
         return; // Discard sub-pixel visual artifacts early
     }
 
@@ -856,8 +1066,7 @@ fn recurse_child(
 
     let is_leaf_or_too_small = !child.is_directory()
         || depth >= config.max_depth
-        || child_rect.width() < MIN_PIXEL_DIM
-        || child_rect.height() < MIN_PIXEL_DIM;
+        || (child.is_directory() && config.detail == MapDetail::Folders);
 
     if is_leaf_or_too_small {
         let name = config.string_pool.get(child.name_id).unwrap_or("");
@@ -903,8 +1112,7 @@ fn build_treemap(
     depth: usize,
     blocks: &mut Vec<TreemapBlock>,
 ) {
-    const MIN_AVG_CHILD_AREA: f64 = 16.0;
-    if blocks.len() >= TRUNCATE_DEPTH {
+    if blocks.len() >= TRUNCATE_DEPTH || !rect.intersects(config.clip) {
         return;
     }
 
@@ -954,23 +1162,6 @@ fn build_treemap(
     }
 
     if children.is_empty() {
-        let name = config.string_pool.get(node.name_id).unwrap_or("");
-        let color = colors::get_treemap_dir_color(name);
-        blocks.push(TreemapBlock {
-            rect,
-            node_idx,
-            color,
-            is_frame: false,
-        });
-        return;
-    }
-
-    let area = (rect.width() * rect.height()) as f64;
-
-    #[allow(clippy::cast_precision_loss)]
-    let avg_area_per_child = area / children.len() as f64;
-
-    if avg_area_per_child < MIN_AVG_CHILD_AREA {
         let name = config.string_pool.get(node.name_id).unwrap_or("");
         let color = colors::get_treemap_dir_color(name);
         blocks.push(TreemapBlock {
@@ -1149,6 +1340,146 @@ mod tests {
     use eframe::egui::Rect;
 
     use super::*;
+
+    #[test]
+    fn dense_folders_show_individual_files_and_folder_mode_collapses_them() {
+        let mut pool = StringPool::new();
+        let name = pool.get_or_insert(b"screenshots");
+        let mut nodes = vec![
+            FileNode::new(name, None, true, false, 0, 0),
+            FileNode::new(name, Some(0), true, false, 0, 0),
+        ];
+        nodes[0].first_child = 1;
+        nodes[0].size = 2000;
+        nodes[1].first_child = 2;
+        nodes[1].size = 2000;
+        for i in 0..2000 {
+            let mut file = FileNode::new(name, Some(1), false, false, 0, 0);
+            file.size = 1;
+            if i < 1999 {
+                file.next_sibling = i + 3;
+            }
+            nodes.push(file);
+        }
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), eframe::egui::vec2(140.0, 140.0));
+        // Less than 16 pixels² per file used to collapse this entire directory.
+        let mut config = TreemapConfig {
+            nodes: &nodes,
+            string_pool: &pool,
+            max_depth: 128,
+            layout: MapLayout::Folders,
+            detail: MapDetail::Files,
+            clip: rect,
+        };
+        let mut blocks = Vec::new();
+        build_treemap(&config, 0, rect, 0, &mut blocks);
+        assert_eq!(
+            blocks
+                .iter()
+                .filter(|b| !b.is_frame && b.node_idx >= 2)
+                .count(),
+            2000
+        );
+        config.detail = MapDetail::Folders;
+        blocks.clear();
+        build_treemap(&config, 0, rect, 0, &mut blocks);
+        assert_eq!(blocks.iter().filter(|b| !b.is_frame).count(), 1);
+        assert!(blocks.iter().any(|b| b.node_idx == 1 && !b.is_frame));
+    }
+
+    #[test]
+    fn zoom_keeps_cursor_anchor_and_culls_offscreen_files() {
+        let offset = eframe::egui::vec2(-20.0, -40.0);
+        let pivot = eframe::egui::vec2(100.0, 150.0);
+        let new = zoom_about(offset, pivot, 2.0, 4.0);
+        assert!(((pivot - offset) / 2.0 - (pivot - new) / 4.0).length() < 0.001);
+        let mut pool = StringPool::new();
+        let name = pool.get_or_insert(b"root");
+        let mut nodes = vec![
+            FileNode::new(name, None, true, false, 0, 0),
+            FileNode::new(name, Some(0), false, false, 0, 0),
+            FileNode::new(name, Some(0), false, false, 0, 0),
+        ];
+        nodes[0].size = 2;
+        nodes[0].first_child = 1;
+        nodes[1].size = 1;
+        nodes[1].next_sibling = 2;
+        nodes[2].size = 1;
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), eframe::egui::vec2(200.0, 100.0));
+        let config = TreemapConfig {
+            nodes: &nodes,
+            string_pool: &pool,
+            max_depth: 128,
+            layout: MapLayout::Stripes,
+            detail: MapDetail::Files,
+            clip: Rect::from_min_max(pos2(110.0, 0.0), pos2(200.0, 100.0)),
+        };
+        let mut blocks = Vec::new();
+        build_treemap(&config, 0, rect, 0, &mut blocks);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].node_idx, 2);
+    }
+
+    #[test]
+    fn palettes_and_all_tile_styles_render_without_native_window() {
+        let mut pool = StringPool::new();
+        let name = pool.get_or_insert(b"image.png");
+        let mut nodes = vec![
+            FileNode::new(name, None, true, false, 0, 0),
+            FileNode::new(name, Some(0), false, false, 0, 0),
+        ];
+        nodes[0].first_child = 1;
+        nodes[0].size = 1024;
+        nodes[1].size = 1024;
+        let snapshot = FileArenaSnapshot {
+            dir_counts: Arc::new(precompute_dir_counts(&nodes)),
+            nodes: Arc::new(NodeStorage::Owned(nodes)),
+            string_pool: Arc::new(pool),
+            extensions: Default::default(),
+        };
+        let ctx = eframe::egui::Context::default();
+        let mut chart = TreemapChart::new();
+        let mut selected = std::collections::HashSet::new();
+        let mut expanded = std::collections::HashSet::new();
+        let mut scroll = false;
+        let mut context = StatContext {
+            selected_nodes: &mut selected,
+            expanded_nodes: &mut expanded,
+            scroll_to_selected: &mut scroll,
+            deduplicator_results: None,
+        };
+        for palette in [
+            MapPalette::Pastel,
+            MapPalette::Vivid,
+            MapPalette::Ocean,
+            MapPalette::Earth,
+            MapPalette::Mono,
+        ] {
+            chart.palette = palette;
+            for style in [
+                TreemapStyle::Flat,
+                TreemapStyle::VerticalGradient,
+                TreemapStyle::OffsetVerticalGradient,
+                TreemapStyle::DiagonalGradient,
+                TreemapStyle::Cushion,
+                TreemapStyle::Bevel,
+                TreemapStyle::Glass,
+                TreemapStyle::Neon,
+                TreemapStyle::Outline,
+            ] {
+                chart.style = style;
+                let output = ctx.run_ui(eframe::egui::RawInput::default(), |ui| {
+                    chart.render(ui, &snapshot, &mut context)
+                });
+                assert!(!output.shapes.is_empty());
+            }
+        }
+        let base = Color32::from_rgb(100, 150, 180);
+        assert_ne!(
+            palette_color(base, MapPalette::Pastel),
+            palette_color(base, MapPalette::Vivid)
+        );
+    }
     use crate::{
         arena::{FileArenaSnapshot, FileNode, NodeStorage, StringPool, precompute_dir_counts},
         stats::StatsChart,
@@ -1400,8 +1731,10 @@ mod tests {
         let config = TreemapConfig {
             nodes: &nodes,
             string_pool: &pool,
-            max_depth: 20,
+            max_depth: 128,
             layout: MapLayout::Classic,
+            detail: MapDetail::Files,
+            clip: Rect::EVERYTHING,
         };
         let mut blocks = Vec::new();
         // A stale node_idx into an empty arena must bail out, not panic.
@@ -1419,8 +1752,10 @@ mod tests {
         let config = TreemapConfig {
             nodes: &nodes,
             string_pool: &pool,
-            max_depth: 20,
+            max_depth: 128,
             layout: MapLayout::Classic,
+            detail: MapDetail::Files,
+            clip: Rect::EVERYTHING,
         };
         let mut blocks = Vec::new();
         let rect = Rect::from_min_size(eframe::egui::Pos2::ZERO, eframe::egui::vec2(100.0, 100.0));
@@ -1445,8 +1780,10 @@ mod tests {
         let config = TreemapConfig {
             nodes: &nodes,
             string_pool: &pool,
-            max_depth: 20,
+            max_depth: 128,
             layout: MapLayout::Classic,
+            detail: MapDetail::Files,
+            clip: Rect::EVERYTHING,
         };
         let mut blocks = Vec::new();
         let rect = Rect::from_min_size(eframe::egui::Pos2::ZERO, eframe::egui::vec2(100.0, 100.0));
@@ -1474,8 +1811,10 @@ mod tests {
             let config = TreemapConfig {
                 nodes: &nodes,
                 string_pool: &pool,
-                max_depth: 20,
+                max_depth: 128,
                 layout,
+                detail: MapDetail::Files,
+                clip: Rect::EVERYTHING,
             };
             let mut blocks = Vec::new();
             build_treemap(&config, 0, rect, 0, &mut blocks);

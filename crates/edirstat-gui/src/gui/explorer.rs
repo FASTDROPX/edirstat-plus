@@ -1096,6 +1096,7 @@ impl GuiApp {
             })
             .collect();
 
+        let live_epoch = self.scan_start_time;
         let custom_cell_ui = Box::new(
             move |ui: &mut egui::Ui,
                   cell_info: &egui_table_kit::layout::CellInfo,
@@ -1103,6 +1104,23 @@ impl GuiApp {
                   text_color: egui::Color32| {
                 if cell_info.col_nr == 0 {
                     let row_idx = active_rows[cell_info.row_nr as usize];
+                    if let Some(epoch) = live_epoch {
+                        let now = ui.input(|i| i.time);
+                        let id = egui::Id::new(("scan_row_birth", epoch, row_idx));
+                        let born = ui.ctx().data_mut(|data| {
+                            if let Some(value) = data.get_temp::<f64>(id) {
+                                value
+                            } else {
+                                data.insert_temp(id, now);
+                                now
+                            }
+                        });
+                        let opacity = ((now - born) / 0.18).clamp(0.0, 1.0) as f32;
+                        ui.set_opacity(opacity);
+                        if opacity < 1.0 {
+                            ui.ctx().request_repaint();
+                        }
+                    }
                     let node = &snapshot_nodes[row_idx];
                     let name = snapshot_string_pool.get(node.name_id).unwrap_or("unknown");
 

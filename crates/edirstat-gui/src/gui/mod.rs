@@ -116,6 +116,7 @@ pub struct GuiApp {
     pub(crate) search_query: String,
     pub(crate) monospace_paths: bool,
     pub(crate) treemap_borders: bool,
+    pub(crate) auto_elevate: bool,
     pub theme: theme::ThemePreference,
     /// Optional host-injected widgets rendered at the very start of the top
     /// panel (e.g. a host app's back/navigation button). `None` for the
@@ -495,6 +496,18 @@ impl GuiApp {
                 )),
             ]);
 
+        let prefs = crate::preferences::load_preferences();
+        shared_state
+            .live_updates
+            .store(prefs.live_tree, Ordering::Relaxed);
+        #[cfg(all(target_os = "windows", not(test)))]
+        if prefs.auto_elevate && !cli_or_gui::is_elevated() {
+            if let Err(error) = cli_or_gui::relaunch_as_elevated() {
+                toast_error(format!(
+                    "Запрос прав администратора отменён или не выполнен: {error}"
+                ));
+            }
+        }
         #[cfg(target_os = "windows")]
         let active_modal = if cli_or_gui::is_elevated() {
             None
@@ -505,7 +518,6 @@ impl GuiApp {
         #[cfg(not(target_os = "windows"))]
         let active_modal = None;
 
-        let prefs = crate::preferences::load_preferences();
         let locale = prefs.locale.unwrap_or_else(Locale::from_system);
 
         // Keep the Fluent runtime aligned with the saved/auto-detected system locale
@@ -533,6 +545,7 @@ impl GuiApp {
             search_query: String::new(),
             monospace_paths: prefs.monospace_paths,
             treemap_borders: prefs.treemap_borders,
+            auto_elevate: prefs.auto_elevate,
             theme: prefs.theme,
             top_panel_prefix: None,
             treemap_style: prefs.treemap_style,
@@ -552,6 +565,8 @@ impl GuiApp {
             treemap_chart: stats::treemap::TreemapChart {
                 layout: prefs.map_layout,
                 coloring: prefs.map_color,
+                detail: prefs.map_detail,
+                palette: prefs.map_palette,
                 ..stats::treemap::TreemapChart::new()
             },
             size_dist_chart: stats::size_distribution::SizeDistributionChart::new(),
@@ -665,6 +680,8 @@ impl GuiApp {
         self.treemap_chart = stats::treemap::TreemapChart {
             layout: self.treemap_chart.layout,
             coloring: self.treemap_chart.coloring,
+            detail: self.treemap_chart.detail,
+            palette: self.treemap_chart.palette,
             ..stats::treemap::TreemapChart::default()
         };
         self.size_dist_chart = stats::size_distribution::SizeDistributionChart::default();
@@ -1395,6 +1412,46 @@ impl GuiApp {
     ) {
         if self.vis_mode == VisMode::Treemap {
             use stats::treemap::{MapColor, MapLayout};
+            ui.horizontal_wrapped(|ui| {
+                ui.selectable_value(
+                    &mut self.treemap_chart.detail,
+                    stats::treemap::MapDetail::Folders,
+                    "По папкам",
+                );
+                ui.selectable_value(
+                    &mut self.treemap_chart.detail,
+                    stats::treemap::MapDetail::Files,
+                    "По файлам",
+                );
+                ui.separator();
+                egui::ComboBox::from_id_salt("map_palette")
+                    .selected_text(match self.treemap_chart.palette {
+                        stats::treemap::MapPalette::Pastel => "Пастельная",
+                        stats::treemap::MapPalette::Vivid => "Насыщенная · WizTree",
+                        stats::treemap::MapPalette::Ocean => "Океан",
+                        stats::treemap::MapPalette::Earth => "Тёплая",
+                        stats::treemap::MapPalette::Mono => "Монохромная",
+                    })
+                    .show_ui(ui, |ui| {
+                        for (palette, label) in [
+                            (stats::treemap::MapPalette::Pastel, "Пастельная"),
+                            (stats::treemap::MapPalette::Vivid, "Насыщенная · WizTree"),
+                            (stats::treemap::MapPalette::Ocean, "Океан"),
+                            (stats::treemap::MapPalette::Earth, "Тёплая"),
+                            (stats::treemap::MapPalette::Mono, "Монохромная"),
+                        ] {
+                            ui.selectable_value(&mut self.treemap_chart.palette, palette, label);
+                        }
+                    });
+                ui.label(format!("{:.0}%", self.treemap_chart.scale * 100.0));
+                if ui
+                    .button("Сбросить зум")
+                    .on_hover_text("Ctrl + колесо: зум к курсору; перетаскивание: перемещение")
+                    .clicked()
+                {
+                    self.treemap_chart.reset_camera();
+                }
+            });
             ui.horizontal_wrapped(|ui| {
                 ui.label("Компоновка:");
                 for (mode, name) in [
@@ -2267,7 +2324,16 @@ impl eframe::App for GuiApp {
             if cancelled {
                 self.reset_state();
             } else {
-                self.total_scan_duration = Some(start.elapsed());
+                let recorded = self
+                    .shared_state
+                    .scan_stats
+                    .completed_millis
+                    .load(Ordering::Relaxed);
+                self.total_scan_duration = Some(if recorded > 0 {
+                    Duration::from_millis(recorded)
+                } else {
+                    start.elapsed()
+                });
                 self.scan_start_time = None;
                 // Scan finished: kick the cleanup analysis over the final
                 // snapshot; a large enough reclaim total raises a one-shot
@@ -2326,6 +2392,12 @@ impl eframe::App for GuiApp {
 
                     ui.checkbox(&mut self.highlight_duplicates, t!("highlight-duplicates"));
                     ui.checkbox(&mut self.treemap_borders, t!("treemap-borders"));
+                    let mut live = self.shared_state.live_updates.load(Ordering::Relaxed);
+                    if ui.checkbox(&mut live, "Живое дерево во время сканирования").on_hover_text("Отключите для минимальных накладных расходов; итоговое дерево появится после завершения.").changed() {
+                        self.shared_state.live_updates.store(live, Ordering::Relaxed);
+                    }
+                    #[cfg(target_os = "windows")]
+                    ui.checkbox(&mut self.auto_elevate, "Всегда запрашивать права администратора при запуске");
                     ui.checkbox(&mut self.deletion_confirmation, t!("deletion-confirmation"));
                     ui.checkbox(&mut self.trash_confirmation, t!("trash-confirmation"));
 
@@ -2348,6 +2420,10 @@ impl eframe::App for GuiApp {
                                 t!("treemap-style-cushion"),
                             ),
                             (stats::treemap::TreemapStyle::Flat, "Плоский".into()),
+                            (stats::treemap::TreemapStyle::Bevel, "Объёмные плитки".into()),
+                            (stats::treemap::TreemapStyle::Glass, "Стекло".into()),
+                            (stats::treemap::TreemapStyle::Neon, "Неон".into()),
+                            (stats::treemap::TreemapStyle::Outline, "Контуры".into()),
                         ];
                         for (style, label) in styles {
                             let is_selected = self.treemap_style == style;
@@ -2651,6 +2727,10 @@ impl eframe::App for GuiApp {
                     "size" => prettier_bytes::ByteFormatter::new().format(bytes as u64).to_string()
                 }));
 
+                let metadata_bytes = self.shared_state.scan_stats.metadata_bytes.load(Ordering::Relaxed);
+                if self.shared_state.scan_stats.reading_mft.load(Ordering::Relaxed) {
+                    ui.label(format!("Чтение MFT: {} метаданных; дерево появится после построения индекса", prettier_bytes::ByteFormatter::new().format(metadata_bytes as u64)));
+                }
                 if is_scanning && let Some(start) = self.scan_start_time {
                     let elapsed = start.elapsed();
 
@@ -2662,9 +2742,8 @@ impl eframe::App for GuiApp {
                         "time" => format!("{:.3}s", elapsed.as_secs_f64())
                     }));
                     ui.separator();
-                    ui.label(t!("scan-speed", {
-                        "speed" => prettier_bytes::ByteFormatter::new().format(speed as u64).to_string()
-                    }));
+                    ui.label(format!("Индексация: {}/с · {:.0} файлов/с", prettier_bytes::ByteFormatter::new().format(speed as u64), file_count as f64 / elapsed.as_secs_f64().max(0.001)))
+                        .on_hover_text("Объём найденных файлов / время сканирования. Это не скорость чтения содержимого диска.");
                 } else if !is_scanning && let Some(duration) = self.total_scan_duration {
                     ui.separator();
                     ui.label(t!("elapsed-time", {
@@ -2677,9 +2756,8 @@ impl eframe::App for GuiApp {
                     } else {
                         0.0
                     };
-                    ui.label(t!("scan-speed", {
-                        "speed" => prettier_bytes::ByteFormatter::new().format(speed as u64).to_string()
-                    }));
+                    ui.label(format!("Индексация: {}/с · {:.0} файлов/с", prettier_bytes::ByteFormatter::new().format(speed as u64), file_count as f64 / duration.as_secs_f64().max(0.001)))
+                        .on_hover_text("Суммарный объём файлов / время работы сканера. Содержимое файлов полностью не читается.");
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2769,6 +2847,10 @@ impl eframe::App for GuiApp {
             treemap_style: self.treemap_style,
             map_layout: self.treemap_chart.layout,
             map_color: self.treemap_chart.coloring,
+            map_detail: self.treemap_chart.detail,
+            map_palette: self.treemap_chart.palette,
+            auto_elevate: self.auto_elevate,
+            live_tree: self.shared_state.live_updates.load(Ordering::Relaxed),
             locale: self.locale_preference,
         };
 
@@ -2994,7 +3076,15 @@ impl GuiApp {
                         };
                         self.treemap_chart.draw_borders = self.treemap_borders;
                         self.treemap_chart.style = self.treemap_style;
+                        self.treemap_chart.allow_fs_actions =
+                            !self.shared_state.is_scanning.load(Ordering::Relaxed);
                         self.treemap_chart.render(ui, snapshot, &mut context);
+                        if let Some(target) = self.treemap_chart.delete_request.take() {
+                            // Keep the existing confirmation, background deletion and refresh pipeline.
+                            let _ = self.command_tx.send(
+                                crate::gui::operations::AppCommand::ShowDeleteModal(vec![target]),
+                            );
+                        }
 
                         if self.treemap_chart.zoom_root != 0
                             && (self.treemap_chart.zoom_root as usize) < snapshot.nodes.len()
@@ -3246,7 +3336,17 @@ impl GuiApp {
                             };
                             self.treemap_chart.draw_borders = self.treemap_borders;
                             self.treemap_chart.style = self.treemap_style;
+                            self.treemap_chart.allow_fs_actions =
+                                !self.shared_state.is_scanning.load(Ordering::Relaxed);
                             self.treemap_chart.render(ui, snapshot, &mut context);
+                            if let Some(target) = self.treemap_chart.delete_request.take() {
+                                // Keep the existing confirmation, background deletion and refresh pipeline.
+                                let _ = self.command_tx.send(
+                                    crate::gui::operations::AppCommand::ShowDeleteModal(vec![
+                                        target,
+                                    ]),
+                                );
+                            }
 
                             if self.treemap_chart.zoom_root != 0
                                 && (self.treemap_chart.zoom_root as usize) < snapshot.nodes.len()

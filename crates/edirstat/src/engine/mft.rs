@@ -64,18 +64,22 @@ fn scan_mft<S: ReadAt>(
         .map_or(4, std::num::NonZeroUsize::get)
         .min(SCAN_THREADS);
     let scan = Scan::new(mft).threads(threads).cancel(scan_cancel);
-    let usage = match Usage::scan_observed(&scan, records, PathPolicy::LIVE, &mut |chunk| {
+    stats.reading_mft.store(true, Ordering::Relaxed);
+    let usage_result = Usage::scan_observed(&scan, records, PathPolicy::LIVE, &mut |chunk| {
         scanned += chunk.records;
-        stats.files_scanned.store(scanned, Ordering::Relaxed);
         stats
-            .bytes_scanned
+            .metadata_bytes
             .store(scanned * record_size, Ordering::Relaxed);
-    }) {
+    });
+    stats.reading_mft.store(false, Ordering::Relaxed);
+    let usage = match usage_result {
         Ok(usage) => usage,
         Err(ntfs_ng::Error::Cancelled) => return Ok(()),
         Err(error) => return Err(invalid(error)),
     };
-    stats.reset();
+    stats.files_scanned.store(0, Ordering::Relaxed);
+    stats.dirs_scanned.store(0, Ordering::Relaxed);
+    stats.bytes_scanned.store(0, Ordering::Relaxed);
 
     let parents = usage.parents(threads);
     let index = &usage.index;
@@ -124,6 +128,7 @@ fn scan_mft<S: ReadAt>(
     }
     let mut subdirs = Vec::new();
     let mut ancestors = Vec::new();
+    let mut last_flush = std::time::Instant::now();
     while let Some((dir, slot)) = stack.pop() {
         if scan_cancel.load(Ordering::Relaxed) {
             break;
@@ -186,8 +191,13 @@ fn scan_mft<S: ReadAt>(
             );
         }
         subdirs.clear();
-        if builder.is_full() {
+        // Publish the root promptly, then throttle partial batches.
+        if slot == 0
+            || builder.is_full()
+            || last_flush.elapsed() >= std::time::Duration::from_millis(200)
+        {
             builder.flush(event_tx, stats);
+            last_flush = std::time::Instant::now();
         }
     }
     builder.flush(event_tx, stats);

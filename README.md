@@ -8,6 +8,20 @@
 
 <p align="center"><b>See where your space goes — from whole folders down to individual files.</b><br>Неофициальная доработка eDirStat: карта папок, новые режимы и подробная статистика.</p>
 
+## v2 · More detail, smoother navigation
+
+**[v2 guide / Инструкция →](docs/V2.md)**
+
+- Explicit **folder / file** modes; dense folders no longer collapse at the old 16 pixels²-per-file threshold.
+- **Ctrl + wheel** zooms toward the cursor; drag to pan. Finer tiles fade in as you approach.
+- **5 palettes** and **9 tile styles**, including vivid WizTree-inspired colors, pastel, glass, neon, and outlines.
+- Map context menu: **Show in Explorer** and **Delete…**, using the existing deletion pipeline.
+- Corrected MFT counters and scan-start timing; the status bar distinguishes indexing throughput from metadata reads.
+- Adaptive partial tree publication, row fades, and a switch to disable live updates.
+- Bounded administrator dialog with error reporting and an opt-in **automatically request administrator rights** preference.
+
+Small warm-cache benchmark: 6000 files, median 8.46 ms before / 7.63 ms after. This is not a full-drive or elevated-MFT speed guarantee. UAC and destructive actions were not invoked in testing.
+
 ## What's new / Что нового
 
 | Feature | Details |
@@ -23,7 +37,7 @@
 
 **[Download the Windows x64 build →](https://github.com/FASTDROPX/edirstat-plus/releases/latest)**
 
-Run `edirstat-custom.exe`. Microsoft Visual C++ Runtime x64 must be available.
+Run `edirstat-plus-v2.exe`. Microsoft Visual C++ Runtime x64 must be available.
 No installer is required. This community build is not an official upstream release.
 
 ## Quick start / Как пользоваться
@@ -51,7 +65,7 @@ The desktop build uses the default features and Release profile of the original 
 ## Verification & limits
 
 - Built locally with Rust 1.100.0 for `x86_64-pc-windows-msvc`; PE32+ AMD64 verified.
-- Version and headless scanning tested. **146 tests passed**; one existing symlink test was excluded after Windows returned `WinError 1314` (missing symlink privilege).
+- Version and headless scanning tested. **118 core + 149 GUI + 11 coordinator tests passed**; one existing symlink test was excluded after Windows returned `WinError 1314` (missing symlink privilege).
 - The folder map was inspected in the running app. Statistics rendering and filtering were tested without a native window. The final toolbar spacing adjustment was compiled but not visually rechecked.
 - Metrics describe the **scanned snapshot**. A folder-only scan is not a full-disk inventory. Live volume capacity/free-space values are shown separately from saved snapshot data.
 - SMART, temperature, fragmentation, and exact duplicate waste are not computed by this new window. Use the existing deduplicator for duplicate analysis.

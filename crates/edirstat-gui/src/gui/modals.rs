@@ -1504,111 +1504,34 @@ impl GuiApp {
             }
         }
 
-        // Render the Admin Access Recommendation Modal
         if self.active_modal == Some(ActiveModal::AdminWarning) {
             let mut open = true;
             egui::Window::new(t!("modal-elevation-title"))
-                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-                .collapsible(false)
-                .resizable(false)
-                .open(&mut open)
-                .title_bar(false) // Disable default system title bar to match custom styles
-                .frame(
-                    egui::Frame::window(&ctx.global_style())
-                        .fill(theme::get_bg_window())
-                        .stroke(egui::Stroke::new(
-                            1.2f32,
-                            egui::Color32::from_rgb(74, 85, 104),
-                        ))
-                        .inner_margin(egui::Margin::ZERO)
-                        .corner_radius(8.0),
-                )
-                .show(ctx, |ui| {
-                    // Header Area
-                    egui::Frame::new()
-                        .inner_margin(egui::Margin::symmetric(16, 12))
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.heading(
-                                    egui::RichText::new(t!("modal-elevation-title"))
-                                        .color(ui.visuals().strong_text_color())
-                                        .strong(),
-                                );
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        let close_btn = ui.button("❌");
-                                        if close_btn.clicked() {
-                                            self.active_modal = None;
-                                        }
-                                    },
-                                );
-                            });
-                        });
-
-                    // Separator line
-                    let (rect, _) = ui.allocate_exact_size(
-                        egui::vec2(ui.available_width(), 1.0),
-                        egui::Sense::hover(),
-                    );
-                    ui.painter().hline(
-                        rect.left()..=rect.right(),
-                        rect.center().y,
-                        egui::Stroke::new(1.0f32, theme::get_stroke_border()),
-                    );
-
-                    // Content Area
-                    egui::Frame::new()
-                        .inner_margin(egui::Margin::same(16))
-                        .show(ui, |ui| {
-                            ui.vertical(|ui| {
-                                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-                                ui.label(t!("modal-elevation-desc"));
-                                ui.add_space(10.0);
-
-                                // Warning highlight box
-                                egui::Frame::new()
-                                    .fill(theme::get_bg_panel())
-                                    .stroke(egui::Stroke::new(1.0f32, theme::get_stroke_border()))
-                                    .inner_margin(egui::Margin::same(12))
-                                    .corner_radius(4.0)
-                                    .show(ui, |ui| {
-                                        ui.set_min_width(ui.available_width());
-                                        ui.horizontal(|ui| {
-                                            ui.colored_label(theme::get_warning_red(), "⚡");
-                                            ui.vertical(|ui| {
-                                                ui.strong(t!("modal-elevation-mft-disabled"));
-                                                ui.small(t!("modal-elevation-mft-desc"));
-                                            });
-                                        });
-                                    });
-
-                                ui.add_space(12.0);
-                                ui.label(t!("modal-elevation-relaunch-prompt"));
-                                ui.add_space(16.0);
-
-                                // Modal actions footer
-                                ui.horizontal(|ui| {
-                                    if ui.button(t!("modal-elevation-continue-std")).clicked() {
-                                        self.active_modal = None;
-                                    }
-
-                                    let relaunch_btn = egui::Button::new(
-                                        egui::RichText::new(t!("modal-elevation-relaunch-btn"))
-                                            .color(theme::COLOR_WHITE)
-                                            .strong(),
-                                    )
-                                    .fill(theme::get_button_orange());
-
-                                    if ui.add(relaunch_btn).clicked() {
-                                        #[cfg(target_os = "windows")]
-                                        {
-                                            let _ = cli_or_gui::relaunch_as_elevated();
-                                        }
-                                    }
-                                });
-                            });
-                        });
+                .id(egui::Id::new("admin_access_dialog"))
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .default_width(500.0).max_width(600.0).collapsible(false).resizable(true)
+                .open(&mut open).show(ctx, |ui| {
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                    ui.label(t!("modal-elevation-desc"));
+                    ui.add_space(10.0);
+                    ui.strong(t!("modal-elevation-mft-disabled"));
+                    ui.label(t!("modal-elevation-mft-desc"));
+                    ui.separator();
+                    ui.checkbox(&mut self.auto_elevate, "Всегда автоматически запрашивать права администратора при запуске");
+                    ui.small("Настройка действует со следующего запуска. При отмене UAC можно продолжить без повышения прав.");
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button(t!("modal-elevation-continue-std")).clicked() { self.active_modal = None; }
+                        if ui.button(t!("modal-elevation-relaunch-btn")).clicked() {
+                            // Save immediately: successful relaunch exits this process.
+                            let mut prefs = self.last_saved_preferences.clone();
+                            prefs.auto_elevate = self.auto_elevate;
+                            crate::preferences::save_preferences(&prefs);
+                            #[cfg(target_os = "windows")]
+                            if let Err(error) = cli_or_gui::relaunch_as_elevated() {
+                                crate::gui::toast_error(format!("Не удалось запустить с правами администратора: {error}"));
+                            }
+                        }
+                    });
                 });
             if !open {
                 self.active_modal = None;

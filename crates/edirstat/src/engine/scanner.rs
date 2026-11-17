@@ -32,6 +32,9 @@ impl EngineScanController {
 
 impl ScanController for EngineScanController {
     fn start_scan(&self, path: PathBuf, same_filesystem: bool) {
+        // Publish the running state synchronously: otherwise the next UI frame
+        // can mistake a not-yet-scheduled coordinator for a completed scan.
+        self.shared_state.is_scanning.store(true, Ordering::SeqCst);
         // Start traversal and coordinator
         let (tx, rx) = crossbeam::channel::unbounded();
 
@@ -58,6 +61,7 @@ impl ScanController for EngineScanController {
                 });
             }
             Err(e) => {
+                self.shared_state.is_scanning.store(false, Ordering::SeqCst);
                 println!("Failed to start traversal: {e}");
             }
         }

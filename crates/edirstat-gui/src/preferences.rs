@@ -36,6 +36,14 @@ pub struct UserPreferences {
     #[serde(default)]
     pub map_color: crate::stats::treemap::MapColor,
     #[serde(default)]
+    pub map_detail: crate::stats::treemap::MapDetail,
+    #[serde(default)]
+    pub map_palette: crate::stats::treemap::MapPalette,
+    #[serde(default)]
+    pub auto_elevate: bool,
+    #[serde(default = "default_true")]
+    pub live_tree: bool,
+    #[serde(default)]
     pub locale: Option<Locale>,
 }
 
@@ -56,6 +64,10 @@ impl Default for UserPreferences {
             treemap_style: TreemapStyle::default(),
             map_layout: Default::default(),
             map_color: Default::default(),
+            map_detail: Default::default(),
+            map_palette: Default::default(),
+            auto_elevate: false,
+            live_tree: true,
             locale: None,
         }
     }
@@ -150,6 +162,10 @@ mod tests {
             theme: ThemePreference::Light,
             treemap_style: TreemapStyle::Cushion,
             locale: Some(Locale::TrTr),
+            map_detail: crate::stats::treemap::MapDetail::Folders,
+            map_palette: crate::stats::treemap::MapPalette::Vivid,
+            auto_elevate: true,
+            live_tree: false,
             ..Default::default()
         };
 

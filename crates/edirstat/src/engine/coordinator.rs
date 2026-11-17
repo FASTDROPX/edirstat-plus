@@ -30,6 +30,9 @@ impl Coordinator {
     pub fn run_coordinator_loop(&mut self, root_path_str: &str) {
         self.shared_state.is_scanning.store(true, Ordering::SeqCst);
 
+        let scan_started = Instant::now();
+        let mut first_publish = true;
+        let mut snapshot_budget = Duration::ZERO;
         let mut tree = Tree::new(root_path_str);
         let mut last_publish = Instant::now();
         let mut publish_interval = Duration::from_millis(100);
@@ -38,7 +41,11 @@ impl Coordinator {
             tree.place(batch);
 
             // Publish snapshot if dirty and scaled interval elapsed
-            if tree.dirty && last_publish.elapsed() >= publish_interval {
+            if self.shared_state.live_updates.load(Ordering::Relaxed)
+                && tree.dirty
+                && (first_publish
+                    || last_publish.elapsed() >= publish_interval.max(snapshot_budget))
+            {
                 let current_size = tree.arena.len();
 
                 // Dynamically scale updates to prevent main thread rendering stutter
@@ -50,11 +57,15 @@ impl Coordinator {
                     Duration::from_millis(100)
                 };
 
+                let snapshot_started = Instant::now();
                 self.shared_state.store_snapshot(tree.snapshot());
                 self.shared_state
                     .extension_stats
                     .store(Arc::new(tree.extension_stats()));
 
+                // Bound repeated full-tree copies to roughly 3% of coordinator time.
+                snapshot_budget = snapshot_started.elapsed().saturating_mul(30);
+                first_publish = false;
                 last_publish = Instant::now();
                 tree.dirty = false;
             }
@@ -76,12 +87,31 @@ impl Coordinator {
             self.shared_state.scan_stats.reset();
         } else {
             let extension_stats = tree.extension_stats();
-            self.shared_state.store_snapshot(tree.finish());
+            let final_snapshot = tree.finish();
+            if let Some(root) = final_snapshot.nodes.first() {
+                self.shared_state.scan_stats.bytes_scanned.store(
+                    usize::try_from(root.size).unwrap_or(usize::MAX),
+                    Ordering::Relaxed,
+                );
+                self.shared_state
+                    .scan_stats
+                    .files_scanned
+                    .store(root.file_count as usize, Ordering::Relaxed);
+                self.shared_state.scan_stats.dirs_scanned.store(
+                    final_snapshot.dir_counts.first().copied().unwrap_or(0) as usize + 1,
+                    Ordering::Relaxed,
+                );
+            }
+            self.shared_state.store_snapshot(final_snapshot);
             self.shared_state
                 .extension_stats
                 .store(Arc::new(extension_stats));
         }
 
+        self.shared_state.scan_stats.completed_millis.store(
+            scan_started.elapsed().as_millis().max(1) as u64,
+            Ordering::Relaxed,
+        );
         self.shared_state.is_scanning.store(false, Ordering::SeqCst);
     }
 }
@@ -702,6 +732,9 @@ mod tests {
         let (root, first) = listing(&slots, 0, &[("d1", dir()), ("f2", file(36, 0))]);
         let (d1, _) = listing(&slots, first, &[("f1", file(64, 0))]);
         let shared = run(vec![root, d1]);
+        assert_eq!(shared.scan_stats.bytes_scanned.load(Ordering::Relaxed), 100);
+        assert_eq!(shared.scan_stats.files_scanned.load(Ordering::Relaxed), 2);
+        assert!(shared.scan_stats.completed_millis.load(Ordering::Relaxed) >= 1);
 
         let snapshot = shared.current_snapshot.load();
         assert_eq!(snapshot.nodes.len(), 4);
@@ -724,6 +757,55 @@ mod tests {
         assert_eq!(snapshot.get_full_path(2), "/root/f2");
         assert_eq!(snapshot.get_full_path(3), "/root/d1/f1");
         assert_eq!(snapshot.dir_counts.as_slice(), [1, 0, 0, 0]);
+    }
+
+    #[test]
+    fn first_live_tree_is_published_before_channel_closes() {
+        let slots = Slots::default();
+        let (batch, _) = listing(&slots, 0, &[("file.png", file(1000, 0))]);
+        let (tx, rx) = crossbeam::channel::unbounded();
+        let shared = Arc::new(SharedState::new());
+        let worker_state = shared.clone();
+        let handle = std::thread::spawn(move || {
+            Coordinator::new(rx, worker_state).run_coordinator_loop("/root")
+        });
+        tx.send(batch).unwrap();
+        let start = Instant::now();
+        while shared.current_snapshot.load().nodes.is_empty()
+            && start.elapsed() < Duration::from_secs(5)
+        {
+            std::thread::yield_now();
+        }
+        assert_eq!(shared.current_snapshot.load().nodes.len(), 2);
+        assert!(shared.is_scanning.load(Ordering::SeqCst));
+        drop(tx);
+        handle.join().unwrap();
+        assert!(!shared.is_scanning.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn final_volume_is_not_mft_metadata_and_live_tree_can_be_disabled() {
+        let slots = Slots::default();
+        let (batch, _) = listing(&slots, 0, &[("large.bin", file(1_000_000_000, 0))]);
+        let (tx, rx) = crossbeam::channel::unbounded();
+        let shared = Arc::new(SharedState::new());
+        shared.live_updates.store(false, Ordering::Relaxed);
+        shared
+            .scan_stats
+            .metadata_bytes
+            .store(1024, Ordering::Relaxed);
+        tx.send(batch).unwrap();
+        drop(tx);
+        Coordinator::new(rx, shared.clone()).run_coordinator_loop("/root");
+        assert_eq!(
+            shared.scan_stats.bytes_scanned.load(Ordering::Relaxed),
+            1_000_000_000
+        );
+        assert_eq!(
+            shared.scan_stats.metadata_bytes.load(Ordering::Relaxed),
+            1024
+        );
+        assert_eq!(shared.current_snapshot.load().nodes[0].size, 1_000_000_000);
     }
 
     #[test]

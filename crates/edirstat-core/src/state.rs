@@ -1,6 +1,6 @@
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 
 use arc_swap::ArcSwap;
@@ -15,6 +15,10 @@ pub struct TraversalStats {
     pub files_scanned: Arc<AtomicUsize>,
     pub dirs_scanned: Arc<AtomicUsize>,
     pub bytes_scanned: Arc<AtomicUsize>,
+    /// Physical MFT metadata bytes, never counted as discovered file sizes.
+    pub metadata_bytes: Arc<AtomicUsize>,
+    pub reading_mft: Arc<AtomicBool>,
+    pub completed_millis: Arc<AtomicU64>,
 }
 
 impl TraversalStats {
@@ -22,6 +26,9 @@ impl TraversalStats {
         self.files_scanned.store(0, Ordering::SeqCst);
         self.dirs_scanned.store(0, Ordering::SeqCst);
         self.bytes_scanned.store(0, Ordering::SeqCst);
+        self.metadata_bytes.store(0, Ordering::SeqCst);
+        self.reading_mft.store(false, Ordering::SeqCst);
+        self.completed_millis.store(0, Ordering::SeqCst);
     }
 }
 
@@ -33,6 +40,8 @@ pub struct SharedState {
     pub is_scanning: Arc<AtomicBool>,
     /// Indicates whether a cancellation request has been triggered
     pub scan_cancel: Arc<AtomicBool>,
+    /// Intermediate snapshots can be disabled when maximum scan throughput matters.
+    pub live_updates: AtomicBool,
     /// Background-computed live extension statistics (ext, `total_size`, `file_count`)
     pub extension_stats: ArcSwap<Vec<(CompactString, u64, u32)>>,
     /// Live scan progress counters (files/dirs/bytes scanned)
@@ -58,6 +67,7 @@ impl SharedState {
             current_snapshot: ArcSwap::new(Arc::new(initial_snapshot)),
             is_scanning: Arc::new(AtomicBool::new(false)),
             scan_cancel: Arc::new(AtomicBool::new(false)),
+            live_updates: AtomicBool::new(true),
             extension_stats: ArcSwap::new(Arc::new(Vec::new())),
             scan_stats: TraversalStats::default(),
         }
@@ -102,12 +112,18 @@ mod tests {
         stats.files_scanned.fetch_add(5, Ordering::SeqCst);
         stats.dirs_scanned.fetch_add(2, Ordering::SeqCst);
         stats.bytes_scanned.fetch_add(4096, Ordering::SeqCst);
+        stats.metadata_bytes.store(8192, Ordering::SeqCst);
+        stats.reading_mft.store(true, Ordering::SeqCst);
+        stats.completed_millis.store(17_000, Ordering::SeqCst);
 
         stats.reset();
 
         assert_eq!(stats.files_scanned.load(Ordering::SeqCst), 0);
         assert_eq!(stats.dirs_scanned.load(Ordering::SeqCst), 0);
         assert_eq!(stats.bytes_scanned.load(Ordering::SeqCst), 0);
+        assert_eq!(stats.metadata_bytes.load(Ordering::SeqCst), 0);
+        assert!(!stats.reading_mft.load(Ordering::SeqCst));
+        assert_eq!(stats.completed_millis.load(Ordering::SeqCst), 0);
     }
 
     #[test]
