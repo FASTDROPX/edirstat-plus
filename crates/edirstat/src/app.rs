@@ -283,7 +283,10 @@ pub fn main() -> anyhow::Result<()> {
     eframe::run_native(
         "edirstat",
         native_options,
-        Box::new(move |_cc| {
+        Box::new(move |cc| {
+            if let Some(state) = &cc.wgpu_render_state {
+                edirstat_gui::stats::treemap_gpu::initialize(&cc.egui_ctx, state.target_format);
+            }
             Ok(Box::new(GuiApp::new(
                 shared_state,
                 Some(scanner),

@@ -6,6 +6,7 @@ pub mod scatter_plot;
 pub mod size_distribution;
 pub mod temporal_timeline;
 pub mod treemap;
+pub mod treemap_gpu;
 
 pub trait StatsChart {
     type Output;

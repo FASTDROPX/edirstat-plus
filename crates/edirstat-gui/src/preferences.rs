@@ -16,6 +16,10 @@ use crate::{
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UserPreferences {
     #[serde(default)]
+    pub map_defaults_version: u32,
+    #[serde(default)]
+    pub animation_defaults_version: u32,
+    #[serde(default)]
     pub monospace_paths: bool,
     #[serde(default)]
     pub highlight_duplicates: bool,
@@ -38,6 +42,8 @@ pub struct UserPreferences {
     #[serde(default)]
     pub map_detail: crate::stats::treemap::MapDetail,
     #[serde(default)]
+    pub map_animation: crate::stats::treemap::MapAnimation,
+    #[serde(default)]
     pub map_palette: crate::stats::treemap::MapPalette,
     #[serde(default)]
     pub auto_elevate: bool,
@@ -54,6 +60,8 @@ const fn default_true() -> bool {
 impl Default for UserPreferences {
     fn default() -> Self {
         Self {
+            map_defaults_version: 1,
+            animation_defaults_version: 1,
             monospace_paths: false,
             highlight_duplicates: false,
             time_format: TimeFormat::default(),
@@ -65,11 +73,19 @@ impl Default for UserPreferences {
             map_layout: Default::default(),
             map_color: Default::default(),
             map_detail: Default::default(),
+            map_animation: Default::default(),
             map_palette: Default::default(),
             auto_elevate: false,
             live_tree: true,
             locale: None,
         }
+    }
+}
+
+fn migrate_animation_defaults(prefs: &mut UserPreferences) {
+    if prefs.animation_defaults_version < 1 {
+        prefs.map_animation = crate::stats::treemap::MapAnimation::Soft;
+        prefs.animation_defaults_version = 1;
     }
 }
 
@@ -83,8 +99,13 @@ fn get_config_path() -> Option<PathBuf> {
 pub fn load_preferences() -> UserPreferences {
     if let Some(path) = get_config_path()
         && let Ok(contents) = std::fs::read_to_string(&path)
-        && let Ok(prefs) = toml::from_str(&contents)
+        && let Ok(mut prefs) = toml::from_str::<UserPreferences>(&contents)
     {
+        if prefs.map_defaults_version < 1 {
+            prefs.map_detail = crate::stats::treemap::MapDetail::Folders;
+            prefs.map_defaults_version = 1;
+        }
+        migrate_animation_defaults(&mut prefs);
         return prefs;
     }
     UserPreferences::default() // Continue with default settings safely if unreadable/absent
@@ -120,6 +141,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn previous_automatic_off_is_migrated_once_but_user_choice_is_preserved() {
+        let mut prefs: UserPreferences = toml::from_str("map_animation = 'Off'").unwrap();
+        migrate_animation_defaults(&mut prefs);
+        assert_eq!(
+            prefs.map_animation,
+            crate::stats::treemap::MapAnimation::Soft
+        );
+        prefs.map_animation = crate::stats::treemap::MapAnimation::Off;
+        let mut restored: UserPreferences =
+            toml::from_str(&toml::to_string(&prefs).unwrap()).unwrap();
+        migrate_animation_defaults(&mut restored);
+        assert_eq!(
+            restored.map_animation,
+            crate::stats::treemap::MapAnimation::Off
+        );
+    }
+
+    #[test]
     fn test_user_preferences_default() {
         let prefs = UserPreferences::default();
         assert!(prefs.deletion_confirmation);
@@ -130,6 +169,10 @@ mod tests {
         assert_eq!(prefs.theme, ThemePreference::System);
         assert_eq!(prefs.treemap_style, TreemapStyle::OffsetVerticalGradient);
         assert_eq!(prefs.locale, None);
+        assert_eq!(
+            prefs.map_animation,
+            crate::stats::treemap::MapAnimation::Soft
+        );
     }
 
     #[test]
@@ -149,6 +192,10 @@ mod tests {
         assert_eq!(prefs.theme, ThemePreference::System);
         assert_eq!(prefs.treemap_style, TreemapStyle::OffsetVerticalGradient);
         assert_eq!(prefs.locale, None);
+        assert_eq!(
+            prefs.map_animation,
+            crate::stats::treemap::MapAnimation::Soft
+        );
 
         Ok(())
     }
@@ -166,6 +213,7 @@ mod tests {
             map_palette: crate::stats::treemap::MapPalette::Vivid,
             auto_elevate: true,
             live_tree: false,
+            map_animation: crate::stats::treemap::MapAnimation::Colors,
             ..Default::default()
         };
 
@@ -175,4 +223,9 @@ mod tests {
 
         Ok(())
     }
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub fn scan_cache_directory() -> Option<PathBuf> {
+    ProjectDirs::from("", "", "eDirStat").map(|dirs| dirs.cache_dir().join("scan-cache-v1"))
 }

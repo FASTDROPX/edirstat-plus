@@ -59,6 +59,14 @@ pub(crate) const HIDE_NA_UI: bool = false;
 /// crate on top of the traversal engine; the wasm frontend passes `None` and
 /// acts as a pure snapshot viewer.
 pub trait ScanController: Send + Sync {
+    /// Finish already queued cache writes before process shutdown.
+    fn flush_cache(&self) {}
+
+    /// Last successfully cached root, used only when no explicit startup path was supplied.
+    fn last_cached_path(&self) -> Option<PathBuf> {
+        None
+    }
+
     /// Start an asynchronous scan of `path`, publishing progress and the final
     /// snapshot into the shared state given at construction.
     fn start_scan(&self, path: PathBuf, same_filesystem: bool);

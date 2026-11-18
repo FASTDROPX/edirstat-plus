@@ -28,6 +28,13 @@ impl Coordinator {
     }
 
     pub fn run_coordinator_loop(&mut self, root_path_str: &str) {
+        self.run_loop(root_path_str, true);
+    }
+    /// The scan controller queues its cache write before exposing completion.
+    pub fn run_coordinator_loop_deferred(&mut self, root_path_str: &str) {
+        self.run_loop(root_path_str, false);
+    }
+    fn run_loop(&mut self, root_path_str: &str, finish: bool) {
         self.shared_state.is_scanning.store(true, Ordering::SeqCst);
 
         let scan_started = Instant::now();
@@ -112,7 +119,9 @@ impl Coordinator {
             scan_started.elapsed().as_millis().max(1) as u64,
             Ordering::Relaxed,
         );
-        self.shared_state.is_scanning.store(false, Ordering::SeqCst);
+        if finish {
+            self.shared_state.is_scanning.store(false, Ordering::SeqCst);
+        }
     }
 }
 

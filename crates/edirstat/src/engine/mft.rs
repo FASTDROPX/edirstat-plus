@@ -65,13 +65,16 @@ fn scan_mft<S: ReadAt>(
         .min(SCAN_THREADS);
     let scan = Scan::new(mft).threads(threads).cancel(scan_cancel);
     stats.reading_mft.store(true, Ordering::Relaxed);
+    stats
+        .mft_total_records
+        .store(records as usize, Ordering::Relaxed);
     let usage_result = Usage::scan_observed(&scan, records, PathPolicy::LIVE, &mut |chunk| {
         scanned += chunk.records;
+        stats.mft_records.store(scanned, Ordering::Relaxed);
         stats
             .metadata_bytes
             .store(scanned * record_size, Ordering::Relaxed);
     });
-    stats.reading_mft.store(false, Ordering::Relaxed);
     let usage = match usage_result {
         Ok(usage) => usage,
         Err(ntfs_ng::Error::Cancelled) => return Ok(()),
@@ -115,6 +118,7 @@ fn scan_mft<S: ReadAt>(
         target = dir;
     }
     let base_depth = index.depth(target);
+    stats.reading_mft.store(false, Ordering::Relaxed);
 
     // Depth-first from the target: each directory listed whole, its subdirectories after.
     let slots = Slots::default();

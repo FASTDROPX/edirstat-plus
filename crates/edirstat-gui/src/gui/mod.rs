@@ -208,6 +208,7 @@ pub struct GuiApp {
     /// they can be re-resolved after the rescan re-indexes the refreshed nodes.
     /// Consumed by the render loop once the rescan's final snapshot lands.
     pub(crate) pending_view_restore: Option<PendingViewRestore>,
+    cache_view_snapshot: Option<Arc<FileArenaSnapshot>>,
 
     /// Caches (Node Index, User String, Group String, Permissions String)
     pub(crate) unix_metadata_cache: Option<(u32, String, String, String)>,
@@ -393,6 +394,11 @@ impl GuiApp {
         initial_path: Option<PathBuf>,
         same_filesystem: bool,
     ) -> Self {
+        let initial_path = initial_path.or_else(|| {
+            scanner
+                .as_ref()
+                .and_then(|scanner| scanner.last_cached_path())
+        });
         // Initialize the command queue channels
         let (command_tx, command_rx) = std::sync::mpsc::channel();
 
@@ -566,6 +572,7 @@ impl GuiApp {
                 layout: prefs.map_layout,
                 coloring: prefs.map_color,
                 detail: prefs.map_detail,
+                animation: prefs.map_animation,
                 palette: prefs.map_palette,
                 ..stats::treemap::TreemapChart::new()
             },
@@ -613,6 +620,7 @@ impl GuiApp {
             last_rendered_snapshot_ptr: 0,
             last_extension_stats_ptr: 0,
             pending_view_restore: None,
+            cache_view_snapshot: None,
 
             zoom_path: None,
 
@@ -681,6 +689,7 @@ impl GuiApp {
             layout: self.treemap_chart.layout,
             coloring: self.treemap_chart.coloring,
             detail: self.treemap_chart.detail,
+            animation: self.treemap_chart.animation,
             palette: self.treemap_chart.palette,
             ..stats::treemap::TreemapChart::default()
         };
@@ -696,6 +705,7 @@ impl GuiApp {
         self.last_rendered_snapshot_ptr = 0;
         self.last_extension_stats_ptr = 0;
         self.pending_view_restore = None;
+        self.cache_view_snapshot = None;
         self.zoom_path = None;
 
         self.unix_metadata_cache = None;
@@ -739,6 +749,9 @@ impl GuiApp {
     }
 
     pub(crate) fn start_scan(&mut self, mut path: PathBuf) {
+        if self.shared_state.is_scanning.load(Ordering::Acquire) {
+            return;
+        }
         let Some(scanner) = self.scanner.clone() else {
             // Snapshot-viewer mode (e.g. wasm): scanning is unavailable.
             return;
@@ -1443,6 +1456,29 @@ impl GuiApp {
                             ui.selectable_value(&mut self.treemap_chart.palette, palette, label);
                         }
                     });
+                egui::ComboBox::from_id_salt("map_animation")
+                    .selected_text(match self.treemap_chart.animation {
+                        stats::treemap::MapAnimation::Off => "Без анимаций",
+                        stats::treemap::MapAnimation::Colors => "Плавный цвет",
+                        stats::treemap::MapAnimation::Soft => "Мягкие анимации",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.treemap_chart.animation,
+                            stats::treemap::MapAnimation::Soft,
+                            "Мягкие анимации",
+                        );
+                        ui.selectable_value(
+                            &mut self.treemap_chart.animation,
+                            stats::treemap::MapAnimation::Off,
+                            "Без анимаций",
+                        );
+                        ui.selectable_value(
+                            &mut self.treemap_chart.animation,
+                            stats::treemap::MapAnimation::Colors,
+                            "Плавный цвет",
+                        );
+                    });
                 ui.label(format!("{:.0}%", self.treemap_chart.scale * 100.0));
                 if ui
                     .button("Сбросить зум")
@@ -2056,6 +2092,13 @@ impl GuiApp {
 }
 
 impl eframe::App for GuiApp {
+    fn on_exit(&mut self) {
+        self.shared_state.scan_cancel.store(true, Ordering::Release);
+        if let Some(scanner) = &self.scanner {
+            scanner.flush_cache();
+        }
+    }
+
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         #[cfg(all(feature = "online", not(target_family = "wasm")))]
         ctx.plugin_or_default::<egui_async::EguiAsyncPlugin>();
@@ -2082,6 +2125,39 @@ impl eframe::App for GuiApp {
         let is_scanning = self.shared_state.is_scanning.load(Ordering::SeqCst);
         let snapshot = self.shared_state.current_snapshot.load();
         let snapshot_ptr = std::sync::Arc::as_ptr(&snapshot.nodes) as usize;
+        let cache_status = self.shared_state.cache_status.load(Ordering::Acquire);
+        if cache_status == 2 && !snapshot.nodes.is_empty() && self.cache_view_snapshot.is_none() {
+            self.cache_view_snapshot = Some(Arc::clone(&snapshot));
+        } else if cache_status != 2
+            && let Some(previous) = self.cache_view_snapshot.take()
+        {
+            if !std::ptr::eq(Arc::as_ptr(&previous.nodes), Arc::as_ptr(&snapshot.nodes)) {
+                let expanded = self.expanded_paths(&previous);
+                let selected: Vec<_> = self
+                    .table_state
+                    .selected_rows
+                    .iter()
+                    .filter(|&idx| (idx as usize) < previous.nodes.len())
+                    .map(|idx| previous.get_full_path(idx))
+                    .collect();
+                self.table_state.expanded_rows.clear();
+                self.table_state.expanded_rows.insert(0);
+                for path in expanded {
+                    if let Some(idx) = snapshot.resolve_path_index(&path) {
+                        self.table_state.expanded_rows.insert(idx);
+                    }
+                }
+                self.table_state.selected_rows.clear();
+                for path in selected {
+                    if let Some(idx) = snapshot.resolve_path_index(&path) {
+                        self.table_state.selected_rows.insert(idx);
+                    }
+                }
+                self.table_state.active_rows.clear();
+                self.table_state.sorted_children_cache.clear();
+                self.focus_node_idx = self.table_state.selected_rows.iter().next();
+            }
+        }
 
         // Escape: always allowed to dismiss active modal or clear search focus/query
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -2659,10 +2735,20 @@ impl eframe::App for GuiApp {
                     } else {
                         ui.put(rect, egui::Spinner::new().size(spinner_size));
                     }
-                    ui.colored_label(theme::get_color_scanning(), t!("scanning-disk"));
+                    let label = match self.shared_state.cache_status.load(Ordering::Acquire) {
+                        1 => std::borrow::Cow::Borrowed("Открытие кэша…"),
+                        2 => std::borrow::Cow::Borrowed("Кэш открыт · проверка диска в фоне…"),
+                        _ => t!("scanning-disk"),
+                    };
+                    ui.colored_label(theme::get_color_scanning(), label);
                 } else if self.current_scan_path.is_some() {
                     let cancelled = self.shared_state.scan_cancel.load(Ordering::SeqCst);
-                    if cancelled {
+                    if self.shared_state.cache_status.load(Ordering::Acquire) == 4 {
+                        ui.colored_label(theme::get_color_scanning(), "Сохранение кэша…");
+                        ui.ctx().request_repaint();
+                    } else if self.shared_state.cache_status.load(Ordering::Acquire) == 3 {
+                        ui.colored_label(crate::colors::WARNING_RED, "Показан кэш · проверка не завершена");
+                    } else if cancelled {
                         ui.colored_label(crate::colors::WARNING_RED, t!("scan-cancelled"));
                     } else {
                         ui.colored_label(theme::get_color_scan_complete(), t!("scan-complete"));
@@ -2715,6 +2801,20 @@ impl eframe::App for GuiApp {
                     .bytes_scanned
                     .load(Ordering::Relaxed);
 
+                let reading_mft = is_scanning && self.shared_state.scan_stats.reading_mft.load(Ordering::Relaxed);
+                let metadata_bytes = self.shared_state.scan_stats.metadata_bytes.load(Ordering::Relaxed);
+                if reading_mft {
+                    let records = self.shared_state.scan_stats.mft_records.load(Ordering::Relaxed);
+                    let total = self.shared_state.scan_stats.mft_total_records.load(Ordering::Relaxed);
+                    let fraction = (records as f32 / total.max(1) as f32).clamp(0.0, 1.0);
+                    ui.add(egui::ProgressBar::new(fraction).desired_width(150.0).show_percentage());
+                    ui.label(format!("MFT: {records} / {total} записей · {}", prettier_bytes::ByteFormatter::new().format(metadata_bytes as u64)));
+                    if records >= total && total > 0 {
+                        ui.label("Построение индекса папок…");
+                    } else {
+                        ui.label("Чтение индекса диска…");
+                    }
+                } else {
                 ui.label(t!("directories-count", {
                     "count" => dir_count
                 }));
@@ -2727,9 +2827,6 @@ impl eframe::App for GuiApp {
                     "size" => prettier_bytes::ByteFormatter::new().format(bytes as u64).to_string()
                 }));
 
-                let metadata_bytes = self.shared_state.scan_stats.metadata_bytes.load(Ordering::Relaxed);
-                if self.shared_state.scan_stats.reading_mft.load(Ordering::Relaxed) {
-                    ui.label(format!("Чтение MFT: {} метаданных; дерево появится после построения индекса", prettier_bytes::ByteFormatter::new().format(metadata_bytes as u64)));
                 }
                 if is_scanning && let Some(start) = self.scan_start_time {
                     let elapsed = start.elapsed();
@@ -2742,8 +2839,14 @@ impl eframe::App for GuiApp {
                         "time" => format!("{:.3}s", elapsed.as_secs_f64())
                     }));
                     ui.separator();
-                    ui.label(format!("Индексация: {}/с · {:.0} файлов/с", prettier_bytes::ByteFormatter::new().format(speed as u64), file_count as f64 / elapsed.as_secs_f64().max(0.001)))
-                        .on_hover_text("Объём найденных файлов / время сканирования. Это не скорость чтения содержимого диска.");
+                    if reading_mft {
+                        let elapsed_secs = elapsed.as_secs_f64().max(0.001);
+                        ui.label(format!("MFT: {}/с", prettier_bytes::ByteFormatter::new().format((metadata_bytes as f64 / elapsed_secs) as u64)))
+                            .on_hover_text("Скорость обработки метаданных MFT. Файлы и дерево появятся после сборки индекса.");
+                    } else {
+                        ui.label(format!("Индексация: {}/с · {:.0} файлов/с", prettier_bytes::ByteFormatter::new().format(speed as u64), file_count as f64 / elapsed.as_secs_f64().max(0.001)))
+                            .on_hover_text("Объём найденных файлов / время сканирования. Это не скорость чтения содержимого диска.");
+                    }
                 } else if !is_scanning && let Some(duration) = self.total_scan_duration {
                     ui.separator();
                     ui.label(t!("elapsed-time", {
@@ -2837,6 +2940,8 @@ impl eframe::App for GuiApp {
 
         // Batched preference saving evaluated at frame exit
         let current_prefs = crate::preferences::UserPreferences {
+            map_defaults_version: 1,
+            animation_defaults_version: 1,
             monospace_paths: self.monospace_paths,
             highlight_duplicates: self.highlight_duplicates,
             time_format: self.time_format.clone(),
@@ -2848,6 +2953,7 @@ impl eframe::App for GuiApp {
             map_layout: self.treemap_chart.layout,
             map_color: self.treemap_chart.coloring,
             map_detail: self.treemap_chart.detail,
+            map_animation: self.treemap_chart.animation,
             map_palette: self.treemap_chart.palette,
             auto_elevate: self.auto_elevate,
             live_tree: self.shared_state.live_updates.load(Ordering::Relaxed),

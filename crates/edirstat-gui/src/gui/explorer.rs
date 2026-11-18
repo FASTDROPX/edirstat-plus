@@ -1010,7 +1010,9 @@ impl GuiApp {
         let name_col_width = self.initial_name_col_width.unwrap_or(320.0);
 
         let columns = vec![
-            egui_table_kit::layout::Column::new(name_col_width).resizable(true),
+            egui_table_kit::layout::Column::new(name_col_width)
+                .resizable(true)
+                .remainder(true),
             egui_table_kit::layout::Column::new(140.0)
                 .range(80.0..=400.0)
                 .resizable(true),
@@ -1036,6 +1038,7 @@ impl GuiApp {
 
         let mut table = egui_table_kit::layout::Table::new()
             .id_salt("hierarchical_file_table")
+            .auto_size_mode(egui_table_kit::layout::AutoSizeMode::Always)
             .num_rows(self.table_state.active_rows.len() as u64)
             .columns(columns)
             .headers([egui_table_kit::layout::HeaderRow::new(row_height)]); // Aligned header row to 28.0

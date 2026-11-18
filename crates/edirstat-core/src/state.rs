@@ -17,6 +17,8 @@ pub struct TraversalStats {
     pub bytes_scanned: Arc<AtomicUsize>,
     /// Physical MFT metadata bytes, never counted as discovered file sizes.
     pub metadata_bytes: Arc<AtomicUsize>,
+    pub mft_records: Arc<AtomicUsize>,
+    pub mft_total_records: Arc<AtomicUsize>,
     pub reading_mft: Arc<AtomicBool>,
     pub completed_millis: Arc<AtomicU64>,
 }
@@ -27,6 +29,8 @@ impl TraversalStats {
         self.dirs_scanned.store(0, Ordering::SeqCst);
         self.bytes_scanned.store(0, Ordering::SeqCst);
         self.metadata_bytes.store(0, Ordering::SeqCst);
+        self.mft_records.store(0, Ordering::SeqCst);
+        self.mft_total_records.store(0, Ordering::SeqCst);
         self.reading_mft.store(false, Ordering::SeqCst);
         self.completed_millis.store(0, Ordering::SeqCst);
     }
@@ -42,6 +46,8 @@ pub struct SharedState {
     pub scan_cancel: Arc<AtomicBool>,
     /// Intermediate snapshots can be disabled when maximum scan throughput matters.
     pub live_updates: AtomicBool,
+    /// 0: live, 1: loading cache, 2: cached tree while verifying, 3: unverified cache (cancel/error), 4: saving.
+    pub cache_status: AtomicUsize,
     /// Background-computed live extension statistics (ext, `total_size`, `file_count`)
     pub extension_stats: ArcSwap<Vec<(CompactString, u64, u32)>>,
     /// Live scan progress counters (files/dirs/bytes scanned)
@@ -68,6 +74,7 @@ impl SharedState {
             is_scanning: Arc::new(AtomicBool::new(false)),
             scan_cancel: Arc::new(AtomicBool::new(false)),
             live_updates: AtomicBool::new(true),
+            cache_status: AtomicUsize::new(0),
             extension_stats: ArcSwap::new(Arc::new(Vec::new())),
             scan_stats: TraversalStats::default(),
         }

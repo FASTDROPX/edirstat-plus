@@ -1,0 +1,13 @@
+   Compiling edirstat-gui v2.2.0 (C:\Users\User\Documents\Codex\2026-11-15\https-github-com-xangelix-edirstat-edirstat\work\edirstat\crates\edirstat-gui)
+    Finished `release` profile [optimized] target(s) in 1m 12s
+     Running unittests src\lib.rs (target\release\build\edirstat-gui/3023818fc4e28459\out\edirstat_gui-3023818fc4e28459.exe)
+
+running 1 test
+GPU_CHECK adapter: AdapterInfo { name: "NVIDIA GeForce RTX 5060", vendor: 4318, device: 11525, device_type: DiscreteGpu, device_pci_bus_id: "0000:05:00.0", driver: "NVIDIA", driver_info: "617.14", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+GPU_CHECK 27 style/DPI/animation/clipping images match CPU (channel tolerance 1/255)
+GPU_PREP QHD cell=3 tiles=409440 median CPU old=38.296ms new=8.766ms speedup=4.37x image_bytes=14745600 instance_bytes=13102080
+GPU_PREP QHD cell=5 tiles=147456 median CPU old=32.756ms new=3.243ms speedup=10.10x image_bytes=14745600 instance_bytes=4718592
+test stats::treemap::tests::gpu_tiny_files_match_cpu_and_benchmark ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 170 filtered out; finished in 1.44s
+

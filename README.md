@@ -8,6 +8,19 @@
 
 <p align="center"><b>See where your space goes — from whole folders down to individual files.</b><br>Неофициальная доработка eDirStat: карта папок, новые режимы и подробная статистика.</p>
 
+## v3 · GPU rendering, disk cache and smoother navigation
+
+**[Windows x64 release →](https://github.com/FASTDROPX/edirstat-plus/releases/tag/v2.2.0-plus.3)** · **[CPU/GPU analysis and measurements →](docs/CPU-GPU-PERFORMANCE.md)**
+
+- Tiny file gradients and one-pixel borders now render directly on the GPU using instanced rectangles. Unchanged tile buffers are reused.
+- QHD synthetic benchmark: CPU preparation of tiny tiles dropped from **38.3 to 8.8 ms** (409,440 tiles) and **32.8 to 3.2 ms** (147,456 tiles). These are stage timings, not whole-application FPS claims.
+- Persistent disk snapshots appear before a background fresh-MFT verification. This is not incremental USN verification.
+- Smooth double-click folder focus, destination layout adapted to the viewport, reversible parent view, and **Ctrl + wheel** zoom/exit. Plain wheel does not exit a focused folder.
+- Stable ordinary zoom, optional soft/color-only/no animations, folder headers protected from file tiles, dense minimum-size filling and mandatory file borders.
+- The folder table uses the available width.
+
+GPU output was checked offscreen on an RTX 5060 across 27 style/DPI images. The release build passed; the full test suite was not rerun for this release. Earlier feature checks are recorded in the development history.
+
 ## v2 · More detail, smoother navigation
 
 **[v2 guide / Инструкция →](docs/V2.md)**
@@ -37,7 +50,7 @@ Small warm-cache benchmark: 6000 files, median 8.46 ms before / 7.63 ms after. T
 
 **[Download the Windows x64 build →](https://github.com/FASTDROPX/edirstat-plus/releases/latest)**
 
-Run `edirstat-plus-v2.exe`. Microsoft Visual C++ Runtime x64 must be available.
+Run `edirstat-plus-performance.exe`. Microsoft Visual C++ Runtime x64 must be available.
 No installer is required. This community build is not an official upstream release.
 
 ## Quick start / Как пользоваться
