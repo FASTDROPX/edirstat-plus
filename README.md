@@ -8,6 +8,21 @@
 
 <p align="center"><b>See where your space goes — from whole folders down to individual files.</b><br>Неофициальная доработка eDirStat: карта папок, новые режимы и подробная статистика.</p>
 
+## v4 · A new workspace and automatic disk cache
+
+**[Download Windows x64 →](https://github.com/FASTDROPX/edirstat-plus/releases/tag/v2.2.0-plus.4)** · **[UX guide / Инструкция →](docs/UX-PREVIEW.md)**
+
+- New Home screen: disks, folders, saved snapshots, path entry and recent locations.
+- Persistent sidebar for disk overview, charts, duplicates, cleanup, Docker and statistics. Home and Settings keep the current analysis available.
+- Dedicated Settings with appearance, workspace, scanning/file operations and keyboard shortcuts. System, dark, light and high-contrast themes, plus three shell accent colors.
+- A clear loading screen, MFT progress, stop action, copy-path action and compact navigation for narrow windows.
+- **Disk cache is enabled by default:** a successful scan saves a snapshot, the last cached path reopens automatically at startup, and a fresh background scan verifies changes. Disable both cache reads and new writes in **Settings → Scanning and files → Disk cache**.
+- Treemap layout, GPU rendering, zoom and folder transitions are unchanged from v3. **Ctrl + wheel** remains the zoom/exit gesture.
+
+This release contains the **UX Preview** shell. It uses the separate **eDirStat UX Preview** settings/cache profile, so the v3 profile is not overwritten. New shell screens are currently in Russian; existing components retain their translations. The existing internal base version remains 2.2.0. The v3 download remains available in Releases.
+
+Validation: Release build succeeded; the shell had 17 offscreen GPU captures covering 800/1280px, three themes, settings categories, loading and a sample workspace. The final small cache preference change was compiled without rerunning tests. Native picker flows and a real disk scan through the new shell were not manually exercised.
+
 ## v3 · GPU rendering, disk cache and smoother navigation
 
 **[Windows x64 release →](https://github.com/FASTDROPX/edirstat-plus/releases/tag/v2.2.0-plus.3)** · **[CPU/GPU analysis and measurements →](docs/CPU-GPU-PERFORMANCE.md)**
@@ -50,7 +65,7 @@ Small warm-cache benchmark: 6000 files, median 8.46 ms before / 7.63 ms after. T
 
 **[Download the Windows x64 build →](https://github.com/FASTDROPX/edirstat-plus/releases/latest)**
 
-Run `edirstat-plus-performance.exe`. Microsoft Visual C++ Runtime x64 must be available.
+Run `edirstat-plus-v4.exe`. Microsoft Visual C++ Runtime x64 must be available.
 No installer is required. This community build is not an official upstream release.
 
 ## Quick start / Как пользоваться

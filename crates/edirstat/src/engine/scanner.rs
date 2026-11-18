@@ -53,6 +53,9 @@ impl ScanController for EngineScanController {
     }
 
     fn last_cached_path(&self) -> Option<PathBuf> {
+        if !self.shared_state.cache_enabled.load(Ordering::Acquire) {
+            return None;
+        }
         self.cache.as_ref()?.last_path()
     }
 
@@ -65,7 +68,14 @@ impl ScanController for EngineScanController {
         {
             return;
         }
-        self.shared_state.cache_status.store(1, Ordering::Release);
+        self.shared_state.cache_status.store(
+            if self.shared_state.cache_enabled.load(Ordering::Acquire) {
+                1
+            } else {
+                0
+            },
+            Ordering::Release,
+        );
         let engine = self.traversal_engine.clone();
         let shared = self.shared_state.clone();
         let cache = self.cache.clone();
@@ -74,9 +84,14 @@ impl ScanController for EngineScanController {
         let request = generation.fetch_add(1, Ordering::SeqCst) + 1;
         std::thread::spawn(move || {
             let path = std::fs::canonicalize(&path).unwrap_or(path);
-            let cached = cache
-                .as_ref()
-                .and_then(|cache| cache.load(&path, same_filesystem));
+            let cached = if shared.cache_enabled.load(Ordering::Acquire) {
+                cache
+                    .as_ref()
+                    .and_then(|cache| cache.load(&path, same_filesystem))
+                    .filter(|_| shared.cache_enabled.load(Ordering::Acquire))
+            } else {
+                None
+            };
             if generation.load(Ordering::Acquire) != request {
                 return;
             }
@@ -140,7 +155,10 @@ impl ScanController for EngineScanController {
                             .extension_stats
                             .store(scan_state.extension_stats.load_full());
                     }
-                    let writing = !cancelled && !failed && cache.is_some();
+                    let writing = !cancelled
+                        && !failed
+                        && cache.is_some()
+                        && shared.cache_enabled.load(Ordering::Acquire);
                     if writing {
                         if let Ok(mut count) = pending_cache_writes.0.lock() {
                             *count += 1;
@@ -155,6 +173,7 @@ impl ScanController for EngineScanController {
                             if let Err(error) =
                                 cache.save_if_current(&path, same_filesystem, &fresh, || {
                                     generation.load(Ordering::Acquire) == request
+                                        && shared.cache_enabled.load(Ordering::Acquire)
                                 })
                             {
                                 eprintln!("Could not save scan cache: {error}");

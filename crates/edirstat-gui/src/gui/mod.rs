@@ -42,6 +42,7 @@ pub mod modals;
 pub mod notifications;
 pub mod operations;
 pub mod reveal;
+pub mod shell;
 pub mod shortcuts;
 pub mod theme;
 
@@ -93,6 +94,7 @@ pub(crate) struct PendingViewRestore {
 
 #[allow(clippy::struct_excessive_bools)]
 pub struct GuiApp {
+    pub(crate) shell: shell::ShellState,
     pub(crate) shared_state: Arc<SharedState>,
     pub(crate) scanner: Option<Arc<dyn ScanController>>,
 
@@ -394,10 +396,19 @@ impl GuiApp {
         initial_path: Option<PathBuf>,
         same_filesystem: bool,
     ) -> Self {
+        let prefs = crate::preferences::load_preferences();
+        shared_state
+            .cache_enabled
+            .store(prefs.disk_cache, Ordering::Release);
         let initial_path = initial_path.or_else(|| {
-            scanner
-                .as_ref()
-                .and_then(|scanner| scanner.last_cached_path())
+            if prefs.disk_cache {
+                scanner
+                    .as_ref()
+                    .and_then(|s| s.last_cached_path())
+                    .filter(|path| path.is_dir())
+            } else {
+                None
+            }
         });
         // Initialize the command queue channels
         let (command_tx, command_rx) = std::sync::mpsc::channel();
@@ -502,7 +513,6 @@ impl GuiApp {
                 )),
             ]);
 
-        let prefs = crate::preferences::load_preferences();
         shared_state
             .live_updates
             .store(prefs.live_tree, Ordering::Relaxed);
@@ -514,15 +524,7 @@ impl GuiApp {
                 ));
             }
         }
-        #[cfg(target_os = "windows")]
-        let active_modal = if cli_or_gui::is_elevated() {
-            None
-        } else {
-            Some(ActiveModal::AdminWarning)
-        };
-
-        #[cfg(not(target_os = "windows"))]
-        let active_modal = None;
+        let active_modal = None; // Preview starts on Home without an unsolicited modal.
 
         let locale = prefs.locale.unwrap_or_else(Locale::from_system);
 
@@ -539,7 +541,11 @@ impl GuiApp {
             }
         }
 
+        let shell = shell::ShellState::load();
+        let (layout_mode, left_panel_collapsed, right_panel_collapsed) =
+            shell.workspace_preferences();
         Self {
+            shell,
             shared_state,
             scanner,
             table_state: egui_table_kit::state::TableState::new("edirstat_hierarchical_table", 0),
@@ -555,8 +561,8 @@ impl GuiApp {
             theme: prefs.theme,
             top_panel_prefix: None,
             treemap_style: prefs.treemap_style,
-            left_panel_collapsed: false,
-            right_panel_collapsed: false,
+            left_panel_collapsed,
+            right_panel_collapsed,
             filter_case_sensitive: false,
             filter_regex: false,
             focus_search: false,
@@ -566,7 +572,7 @@ impl GuiApp {
             initial_name_col_width: None,
             vis_mode: VisMode::Treemap,
             plot_type: PlotType::SizeDistribution,
-            layout_mode: LayoutMode::WinDirStat,
+            layout_mode,
             disk_stats: disk_stats::DiskStatsWindow::default(),
             treemap_chart: stats::treemap::TreemapChart {
                 layout: prefs.map_layout,
@@ -772,12 +778,15 @@ impl GuiApp {
         self.scan_start_time = Some(Instant::now());
         self.total_scan_duration = None;
 
+        self.shell.remember(&path);
+        self.shell.page = shell::Page::Workspace;
         scanner.start_scan(path, self.same_filesystem);
     }
 
     pub fn load_snapshot_file(&mut self, path: PathBuf) -> Result<(), crate::EdirstatError> {
         let loaded = crate::snapshot::load_snapshot_full(&path)?;
         self.ingest_loaded_snapshot(loaded);
+        self.shell.page = shell::Page::Workspace;
         let file_name = path
             .file_name()
             .map(|s| s.to_string_lossy())
@@ -1712,59 +1721,6 @@ impl GuiApp {
                 }
             }
         });
-        // Visualization tabs have their own wrapping row.
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("☷ Статистика диска").clicked() {
-                self.disk_stats.open = true;
-            }
-            // Cleanup trashing needs live filesystem access (native-only)
-            if crate::IS_NATIVE || !crate::HIDE_NA_UI {
-                let res = ui
-                    .add_enabled_ui(crate::IS_NATIVE, |ui| {
-                        ui.selectable_value(
-                            &mut self.vis_mode,
-                            VisMode::Cleanup,
-                            t!("vis-mode-cleanup"),
-                        )
-                    })
-                    .inner;
-                if !crate::IS_NATIVE {
-                    res.on_disabled_hover_text(t!("web-not-available"));
-                }
-            }
-            // Docker disk usage requires live filesystem access (native-only)
-            if crate::IS_NATIVE || !crate::HIDE_NA_UI {
-                let res = ui
-                    .add_enabled_ui(crate::IS_NATIVE, |ui| {
-                        ui.selectable_value(
-                            &mut self.vis_mode,
-                            VisMode::Docker,
-                            t!("vis-mode-docker"),
-                        )
-                    })
-                    .inner;
-                if !crate::IS_NATIVE {
-                    res.on_disabled_hover_text(t!("web-not-available"));
-                }
-            }
-            // Deduplication requires live filesystem access (native-only)
-            if crate::IS_NATIVE || !crate::HIDE_NA_UI {
-                let res = ui
-                    .add_enabled_ui(crate::IS_NATIVE, |ui| {
-                        ui.selectable_value(
-                            &mut self.vis_mode,
-                            VisMode::Deduplicator,
-                            t!("vis-mode-deduplicator"),
-                        )
-                    })
-                    .inner;
-                if !crate::IS_NATIVE {
-                    res.on_disabled_hover_text(t!("web-not-available"));
-                }
-            }
-            ui.selectable_value(&mut self.vis_mode, VisMode::Plots, t!("vis-mode-plots"));
-            ui.selectable_value(&mut self.vis_mode, VisMode::Treemap, t!("vis-mode-treemap"));
-        });
     }
 
     pub(crate) fn process_commands(
@@ -2421,486 +2377,29 @@ impl eframe::App for GuiApp {
         // Repaint during scan to show live progress, or continuously while selected to drive the glow animation
         if is_scanning {
             ctx.request_repaint_after(Duration::from_millis(50));
-        } else if !self.table_state.selected_rows.is_empty() {
+        } else if self.shell.page == shell::Page::Workspace
+            && !self.table_state.selected_rows.is_empty()
+        {
             ctx.request_repaint();
-        } else if snapshot.nodes.is_empty() {
-            // Animating the Scan Directory button when no scan is active and no snapshot is open
-            ctx.request_repaint_after(Duration::from_millis(50));
         }
 
         // Apply custom style
         theme::setup_custom_style(&ctx, self.theme);
 
-        // Top Control Panel
-        egui::Panel::top("top_panel").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                if let Some(prefix) = &mut self.top_panel_prefix {
-                    prefix(ui);
-                    ui.separator();
-                }
-                ui.heading(
-                    egui::RichText::new("eDirStat")
-                        .strong()
-                        .color(ui.visuals().strong_text_color()),
-                );
-                ui.add(
-                    egui::Image::new(egui::include_image!(
-                        "../../assets/img/icon-transparent.png"
-                    ))
-                    .max_height(24.0),
-                );
-                ui.separator();
+        self.render_shell_top(ui, &snapshot, is_scanning);
+        self.render_shell_navigation(ui, &snapshot);
 
-                // Temporarily disable button frames to make top-level menus flat & clean
-                let saved_button_frame = ui.visuals().button_frame;
-                ui.style_mut().visuals.button_frame = false;
+        self.render_shell_status(ui, &snapshot, is_scanning);
 
-                // Top menu buttons (File / View / Help)
-                ui.menu_button(t!("file"), |ui| {
-                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                    self.draw_file_menu_contents(ui, &snapshot);
-                });
-                ui.menu_button(t!("view"), |ui| {
-                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-
-                    // Aligned emoji checkbox layout
-                    ui.checkbox(&mut self.monospace_paths, t!("monospace-paths"));
-
-                    ui.checkbox(&mut self.highlight_duplicates, t!("highlight-duplicates"));
-                    ui.checkbox(&mut self.treemap_borders, t!("treemap-borders"));
-                    let mut live = self.shared_state.live_updates.load(Ordering::Relaxed);
-                    if ui.checkbox(&mut live, "Живое дерево во время сканирования").on_hover_text("Отключите для минимальных накладных расходов; итоговое дерево появится после завершения.").changed() {
-                        self.shared_state.live_updates.store(live, Ordering::Relaxed);
-                    }
-                    #[cfg(target_os = "windows")]
-                    ui.checkbox(&mut self.auto_elevate, "Всегда запрашивать права администратора при запуске");
-                    ui.checkbox(&mut self.deletion_confirmation, t!("deletion-confirmation"));
-                    ui.checkbox(&mut self.trash_confirmation, t!("trash-confirmation"));
-
-                    ui.menu_button(t!("treemap-style"), |ui| {
-                        let styles = [
-                            (
-                                stats::treemap::TreemapStyle::VerticalGradient,
-                                t!("treemap-style-vertical"),
-                            ),
-                            (
-                                stats::treemap::TreemapStyle::OffsetVerticalGradient,
-                                t!("treemap-style-offset-vertical"),
-                            ),
-                            (
-                                stats::treemap::TreemapStyle::DiagonalGradient,
-                                t!("treemap-style-diagonal"),
-                            ),
-                            (
-                                stats::treemap::TreemapStyle::Cushion,
-                                t!("treemap-style-cushion"),
-                            ),
-                            (stats::treemap::TreemapStyle::Flat, "Плоский".into()),
-                            (stats::treemap::TreemapStyle::Bevel, "Объёмные плитки".into()),
-                            (stats::treemap::TreemapStyle::Glass, "Стекло".into()),
-                            (stats::treemap::TreemapStyle::Neon, "Неон".into()),
-                            (stats::treemap::TreemapStyle::Outline, "Контуры".into()),
-                        ];
-                        for (style, label) in styles {
-                            let is_selected = self.treemap_style == style;
-                            if ui.selectable_label(is_selected, label).clicked() {
-                                self.treemap_style = style;
-                                ui.close_kind(egui::UiKind::Menu);
-                            }
-                        }
-                    });
-
-                    ui.menu_button(t!("theme"), |ui| {
-                        let themes = [
-                            (theme::ThemePreference::System, t!("theme-system")),
-                            (theme::ThemePreference::Dark, t!("theme-dark")),
-                            (
-                                theme::ThemePreference::HighContrast,
-                                t!("theme-high-contrast"),
-                            ),
-                            (theme::ThemePreference::Light, t!("theme-light")),
-                        ];
-                        for (pref, label) in themes {
-                            let is_selected = self.theme == pref;
-                            if ui.selectable_label(is_selected, label).clicked() {
-                                self.theme = pref;
-                                theme::clear_color_cache();
-                                ui.close_kind(egui::UiKind::Menu);
-                            }
-                        }
-                    });
-
-                    ui.menu_button(t!("time-format"), |ui| {
-                        for format in crate::time_utils::CommonTimeFormat::ALL {
-                            let is_selected = self.time_format.0 == format.as_str();
-                            if ui.selectable_label(is_selected, format.label()).clicked() {
-                                self.time_format =
-                                    crate::time_utils::TimeFormat(format.as_str().to_string());
-                                ui.close_kind(egui::UiKind::Menu);
-                            }
-                        }
-                    });
-
-                    ui.menu_button(t!("language"), |ui| {
-                        for locale in Locale::iter() {
-                            let is_selected = self.locale == locale;
-                            if ui.selectable_label(is_selected, locale.as_str()).clicked() {
-                                locale.apply();
-                                self.locale = locale;
-                                self.locale_preference = Some(locale);
-                                ui.close_kind(egui::UiKind::Menu);
-                            }
-                        }
-                    });
-
-                    ui.separator();
-                    ui.label(t!("layout-mode"));
-                    ui.radio_value(
-                        &mut self.layout_mode,
-                        LayoutMode::Classic,
-                        t!("classic-layout"),
-                    );
-                    ui.radio_value(
-                        &mut self.layout_mode,
-                        LayoutMode::WinDirStat,
-                        t!("windirstat-layout"),
-                    );
-
-                    ui.separator();
-
-                    let is_classic = self.layout_mode == LayoutMode::Classic;
-                    if is_classic {
-                        let left_label = t!("toggle-left-panel", {
-                            "collapsed" => self.left_panel_collapsed.to_string()
-                        });
-                        if ui
-                            .add(shortcuts::button_with_shortcut_str(left_label, "F9"))
-                            .clicked()
-                        {
-                            self.left_panel_collapsed = !self.left_panel_collapsed;
-                            ui.close_kind(egui::UiKind::Menu);
-                        }
-                    }
-
-                    let right_label = t!("toggle-right-panel", {
-                        "collapsed" => self.right_panel_collapsed.to_string(),
-                        "is_classic" => is_classic.to_string()
-                    });
-                    if ui
-                        .add(shortcuts::button_with_shortcut_str(right_label, "F11"))
-                        .clicked()
-                    {
-                        self.right_panel_collapsed = !self.right_panel_collapsed;
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-
-                    ui.separator();
-                    if ui
-                        .add(shortcuts::button_with_shortcut(
-                            t!("collapse-all"),
-                            &shortcuts::SHORTCUT_COLLAPSE_ALL,
-                            ui.ctx(),
-                        ))
-                        .clicked()
-                    {
-                        self.table_state.expanded_rows.clear();
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                });
-                ui.menu_button(t!("help"), |ui| {
-                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                    if ui
-                        .add(shortcuts::button_with_shortcut(
-                            t!("about"),
-                            &shortcuts::SHORTCUT_ABOUT,
-                            ui.ctx(),
-                        ))
-                        .clicked()
-                    {
-                        self.active_modal = Some(ActiveModal::About);
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                    if ui.button(t!("modal-about-license-btn")).clicked() {
-                        self.selected_license_tab = LicenseTab::Edirstat;
-                        self.show_licenses = true;
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                });
-
-                ui.separator();
-
-                // Scan initiation requires a native scanner backend
-                if self.scanner.is_some() || !crate::HIDE_NA_UI {
-                    let has_scanner = self.scanner.is_some();
-                    let res = ui
-                        .add_enabled_ui(has_scanner, |ui| {
-                            self.draw_scan_button(ui, is_scanning, &snapshot);
-                        })
-                        .response;
-                    if !has_scanner {
-                        res.on_disabled_hover_text(t!("web-not-available"));
-                    }
-                }
-
-                ui.add_space(10.0);
-
-                let sc_save =
-                    shortcuts::format_shortcut(ui.ctx(), &shortcuts::SHORTCUT_SAVE_SNAPSHOT);
-                if ui
-                    .button(t!("save-snapshot"))
-                    .on_hover_text(format!(
-                        "{} ({sc_save})\nSave active scan to a compressed snapshot (*.edst.zst with Zstandard)",
-                        t!("save-snapshot")
-                    ))
-                    .clicked()
-                    && !snapshot.nodes.is_empty()
-                {
-                    self.prompt_save_snapshot(&snapshot);
-                }
-
-                ui.add_space(10.0);
-
-                #[cfg(not(target_family = "wasm"))]
-                if ui.button(t!("load-snapshot")).clicked() {
-                    let file_opt = FileDialog::new()
-                        .add_filter("eDirStat Snapshot (*.edst.zst, *.edst)", &["edst.zst", "edst", "zst"])
-                        .add_filter("All Files (*)", &["*"])
-                        .pick_file();
-                    if let Some(path) = file_opt
-                        && let Err(e) = self.load_snapshot_file(path)
-                    {
-                        crate::gui::toast_error(format!("Failed to load snapshot: {e}"));
-                    }
-                }
-
-                #[cfg(target_family = "wasm")]
-                if ui.button(t!("load-snapshot")).clicked() {
-                    // On wasm the async file picker delivers file bytes, which are
-                    // handed to the app through the regular command queue.
-                    let command_tx = self.command_tx.clone();
-                    let ctx = ui.ctx().clone();
-                    wasm_bindgen_futures::spawn_local(async move {
-                        if let Some(handle) = rfd::AsyncFileDialog::new()
-                            .add_filter("eDirStat Snapshot (*.edst.zst, *.edst)", &["edst.zst", "edst", "zst"])
-                            .add_filter("All Files (*)", &["*"])
-                            .pick_file()
-                            .await
-                        {
-                            let bytes = handle.read().await;
-                            let _ = command_tx.send(
-                                crate::gui::operations::AppCommand::LoadSnapshotBytes {
-                                    name: handle.file_name(),
-                                    bytes,
-                                },
-                            );
-                            ctx.request_repaint();
-                        }
-                    });
-                }
-
-                ui.separator();
-
-                // Live status display
-                if is_scanning {
-                    let spinner_size = 18.0;
-                    let (rect, mut response) = ui.allocate_exact_size(
-                        egui::vec2(spinner_size, spinner_size),
-                        egui::Sense::click(),
-                    );
-
-                    if response.hovered() {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                        response = response.on_hover_text(t!("scan-cancel-hover"));
-
-                        let stroke = egui::Stroke::new(2.0f32, crate::colors::WARNING_RED);
-                        let inset = 4.0;
-                        ui.painter().line_segment(
-                            [
-                                rect.left_top() + egui::vec2(inset, inset),
-                                rect.right_bottom() - egui::vec2(inset, inset),
-                            ],
-                            stroke,
-                        );
-                        ui.painter().line_segment(
-                            [
-                                rect.right_top() + egui::vec2(-inset, inset),
-                                rect.left_bottom() - egui::vec2(-inset, inset),
-                            ],
-                            stroke,
-                        );
-
-                        if response.clicked() {
-                            self.shared_state.scan_cancel.store(true, Ordering::SeqCst);
-                        }
-                    } else {
-                        ui.put(rect, egui::Spinner::new().size(spinner_size));
-                    }
-                    let label = match self.shared_state.cache_status.load(Ordering::Acquire) {
-                        1 => std::borrow::Cow::Borrowed("Открытие кэша…"),
-                        2 => std::borrow::Cow::Borrowed("Кэш открыт · проверка диска в фоне…"),
-                        _ => t!("scanning-disk"),
-                    };
-                    ui.colored_label(theme::get_color_scanning(), label);
-                } else if self.current_scan_path.is_some() {
-                    let cancelled = self.shared_state.scan_cancel.load(Ordering::SeqCst);
-                    if self.shared_state.cache_status.load(Ordering::Acquire) == 4 {
-                        ui.colored_label(theme::get_color_scanning(), "Сохранение кэша…");
-                        ui.ctx().request_repaint();
-                    } else if self.shared_state.cache_status.load(Ordering::Acquire) == 3 {
-                        ui.colored_label(crate::colors::WARNING_RED, "Показан кэш · проверка не завершена");
-                    } else if cancelled {
-                        ui.colored_label(crate::colors::WARNING_RED, t!("scan-cancelled"));
-                    } else {
-                        ui.colored_label(theme::get_color_scan_complete(), t!("scan-complete"));
-                    }
-                } else {
-                    ui.label(t!("idle"));
-                }
-
-                if let Some(ref path) = self.current_scan_path {
-                    ui.separator();
-                    let path_lossy = path.to_string_lossy();
-                    let cleaned_path = crate::arena::clean_unc_path(&path_lossy);
-                    ui.label(t!("path-label", {
-                        "path" => cleaned_path.as_ref()
-                    }));
-                }
-
-                // --- Right-Aligned Concurrency Badge ---
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if let Some(ref scanner) = self.scanner {
-                        let threads = scanner.num_threads();
-                        let badge_text = t!("worker-threads", {
-                            "count" => threads
-                        });
-                        ui.colored_label(theme::get_glow_inner_core(), badge_text)
-                            .on_hover_text(t!("worker-threads-hover"));
-                    }
-                });
-
-                ui.style_mut().visuals.button_frame = saved_button_frame; // Restore default button frames
-            });
-        });
-
-        // Bottom Stats Panel
-        egui::Panel::bottom("bottom_panel").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let file_count = self
-                    .shared_state
-                    .scan_stats
-                    .files_scanned
-                    .load(Ordering::Relaxed);
-                let dir_count = self
-                    .shared_state
-                    .scan_stats
-                    .dirs_scanned
-                    .load(Ordering::Relaxed);
-                let bytes = self
-                    .shared_state
-                    .scan_stats
-                    .bytes_scanned
-                    .load(Ordering::Relaxed);
-
-                let reading_mft = is_scanning && self.shared_state.scan_stats.reading_mft.load(Ordering::Relaxed);
-                let metadata_bytes = self.shared_state.scan_stats.metadata_bytes.load(Ordering::Relaxed);
-                if reading_mft {
-                    let records = self.shared_state.scan_stats.mft_records.load(Ordering::Relaxed);
-                    let total = self.shared_state.scan_stats.mft_total_records.load(Ordering::Relaxed);
-                    let fraction = (records as f32 / total.max(1) as f32).clamp(0.0, 1.0);
-                    ui.add(egui::ProgressBar::new(fraction).desired_width(150.0).show_percentage());
-                    ui.label(format!("MFT: {records} / {total} записей · {}", prettier_bytes::ByteFormatter::new().format(metadata_bytes as u64)));
-                    if records >= total && total > 0 {
-                        ui.label("Построение индекса папок…");
-                    } else {
-                        ui.label("Чтение индекса диска…");
-                    }
-                } else {
-                ui.label(t!("directories-count", {
-                    "count" => dir_count
-                }));
-                ui.separator();
-                ui.label(t!("files-count", {
-                    "count" => file_count
-                }));
-                ui.separator();
-                ui.label(t!("total-size", {
-                    "size" => prettier_bytes::ByteFormatter::new().format(bytes as u64).to_string()
-                }));
-
-                }
-                if is_scanning && let Some(start) = self.scan_start_time {
-                    let elapsed = start.elapsed();
-
-                    #[allow(clippy::cast_precision_loss)]
-                    let speed = bytes as f64 / elapsed.as_secs_f64();
-
-                    ui.separator();
-                    ui.label(t!("elapsed-time", {
-                        "time" => format!("{:.3}s", elapsed.as_secs_f64())
-                    }));
-                    ui.separator();
-                    if reading_mft {
-                        let elapsed_secs = elapsed.as_secs_f64().max(0.001);
-                        ui.label(format!("MFT: {}/с", prettier_bytes::ByteFormatter::new().format((metadata_bytes as f64 / elapsed_secs) as u64)))
-                            .on_hover_text("Скорость обработки метаданных MFT. Файлы и дерево появятся после сборки индекса.");
-                    } else {
-                        ui.label(format!("Индексация: {}/с · {:.0} файлов/с", prettier_bytes::ByteFormatter::new().format(speed as u64), file_count as f64 / elapsed.as_secs_f64().max(0.001)))
-                            .on_hover_text("Объём найденных файлов / время сканирования. Это не скорость чтения содержимого диска.");
-                    }
-                } else if !is_scanning && let Some(duration) = self.total_scan_duration {
-                    ui.separator();
-                    ui.label(t!("elapsed-time", {
-                        "time" => format!("{:.3}s", duration.as_secs_f64())
-                    }));
-                    ui.separator();
-                    #[allow(clippy::cast_precision_loss)]
-                    let speed = if duration.as_secs_f64() > 0.0 {
-                        bytes as f64 / duration.as_secs_f64()
-                    } else {
-                        0.0
-                    };
-                    ui.label(format!("Индексация: {}/с · {:.0} файлов/с", prettier_bytes::ByteFormatter::new().format(speed as u64), file_count as f64 / duration.as_secs_f64().max(0.001)))
-                        .on_hover_text("Суммарный объём файлов / время работы сканера. Содержимое файлов полностью не читается.");
-                }
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if self.table_state.selected_rows.len() == 1 {
-                        if let Some(idx) = self.table_state.selected_rows.iter().next()
-                            && (idx as usize) < snapshot.nodes.len()
-                        {
-                            let size_str = prettier_bytes::ByteFormatter::new()
-                                .format(snapshot.nodes[idx as usize].size)
-                                .to_string();
-                            ui.strong(size_str);
-                            let path_str = snapshot.get_full_path(idx);
-                            let cleaned_path = crate::arena::clean_unc_path(&path_str);
-                            ui.label(t!("selection-path", {
-                                "path" => cleaned_path.as_ref()
-                            }));
-                        }
-                    } else if !self.table_state.selected_rows.is_empty() {
-                        let total_size: u64 = self
-                            .table_state
-                            .selected_rows
-                            .iter()
-                            .map(|idx| snapshot.nodes[idx as usize].size)
-                            .sum();
-                        let size_str = prettier_bytes::ByteFormatter::new()
-                            .format(total_size)
-                            .to_string();
-                        ui.strong(size_str);
-                        ui.label(t!("selection-items", {
-                            "count" => self.table_state.selected_rows.len()
-                        }));
-                    }
-                });
-            });
-        });
-
-        if snapshot.nodes.is_empty() && cfg!(target_family = "wasm") {
-            egui::CentralPanel::default().show(ui, |ui| {
-                self.render_welcome_screen(ui);
-            });
+        if self.shell.page == shell::Page::Home {
+            egui::CentralPanel::default().show(ui, |ui| self.render_shell_home(ui, &snapshot));
+        } else if self.shell.page == shell::Page::Settings {
+            egui::CentralPanel::default().show(ui, |ui| self.render_shell_settings(ui));
+        } else if snapshot.nodes.is_empty() && self.vis_mode == VisMode::Treemap {
+            egui::CentralPanel::default().show(ui, |ui| self.render_shell_loading(ui, is_scanning));
+        } else if self.vis_mode != VisMode::Treemap {
+            egui::CentralPanel::default()
+                .show(ui, |ui| self.render_classic_central_panel(ui, &snapshot));
         } else if self.layout_mode == LayoutMode::Classic {
             // Left Panel - Directory Tree Explorer
             if !self.left_panel_collapsed {
@@ -2938,6 +2437,13 @@ impl eframe::App for GuiApp {
             tracy_client::frame_mark();
         }
 
+        self.shell.remember_workspace(
+            self.layout_mode,
+            self.left_panel_collapsed,
+            self.right_panel_collapsed,
+        );
+        self.shell.save_if_changed();
+
         // Batched preference saving evaluated at frame exit
         let current_prefs = crate::preferences::UserPreferences {
             map_defaults_version: 1,
@@ -2957,6 +2463,7 @@ impl eframe::App for GuiApp {
             map_palette: self.treemap_chart.palette,
             auto_elevate: self.auto_elevate,
             live_tree: self.shared_state.live_updates.load(Ordering::Relaxed),
+            disk_cache: self.shared_state.cache_enabled.load(Ordering::Acquire),
             locale: self.locale_preference,
         };
 

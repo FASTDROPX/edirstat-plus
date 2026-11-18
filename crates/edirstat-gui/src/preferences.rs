@@ -49,6 +49,8 @@ pub struct UserPreferences {
     pub auto_elevate: bool,
     #[serde(default = "default_true")]
     pub live_tree: bool,
+    #[serde(default = "default_true")]
+    pub disk_cache: bool,
     #[serde(default)]
     pub locale: Option<Locale>,
 }
@@ -77,6 +79,7 @@ impl Default for UserPreferences {
             map_palette: Default::default(),
             auto_elevate: false,
             live_tree: true,
+            disk_cache: true,
             locale: None,
         }
     }
@@ -91,7 +94,8 @@ fn migrate_animation_defaults(prefs: &mut UserPreferences) {
 
 #[cfg(not(target_family = "wasm"))]
 fn get_config_path() -> Option<PathBuf> {
-    ProjectDirs::from("", "", "eDirStat").map(|dirs| dirs.config_dir().join("config.toml"))
+    ProjectDirs::from("", "", "eDirStat UX Preview")
+        .map(|dirs| dirs.config_dir().join("config.toml"))
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -227,5 +231,6 @@ mod tests {
 
 #[cfg(not(target_family = "wasm"))]
 pub fn scan_cache_directory() -> Option<PathBuf> {
-    ProjectDirs::from("", "", "eDirStat").map(|dirs| dirs.cache_dir().join("scan-cache-v1"))
+    ProjectDirs::from("", "", "eDirStat UX Preview")
+        .map(|dirs| dirs.cache_dir().join("scan-cache-v1"))
 }

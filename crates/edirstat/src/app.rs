@@ -263,7 +263,7 @@ pub fn main() -> anyhow::Result<()> {
     // Native boot options for eframe
     let native_options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("eDirStat - Cross-Platform Disk Usage Analyzer")
+            .with_title("eDirStat Plus — UX Preview")
             .with_icon(
                 eframe::icon_data::from_png_bytes(
                     &include_bytes!("../assets/img/icon_512x.png")[..],

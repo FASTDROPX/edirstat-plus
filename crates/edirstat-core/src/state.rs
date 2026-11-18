@@ -48,6 +48,8 @@ pub struct SharedState {
     pub live_updates: AtomicBool,
     /// 0: live, 1: loading cache, 2: cached tree while verifying, 3: unverified cache (cancel/error), 4: saving.
     pub cache_status: AtomicUsize,
+    /// User preference: permit persistent snapshot reads and writes.
+    pub cache_enabled: AtomicBool,
     /// Background-computed live extension statistics (ext, `total_size`, `file_count`)
     pub extension_stats: ArcSwap<Vec<(CompactString, u64, u32)>>,
     /// Live scan progress counters (files/dirs/bytes scanned)
@@ -75,6 +77,7 @@ impl SharedState {
             scan_cancel: Arc::new(AtomicBool::new(false)),
             live_updates: AtomicBool::new(true),
             cache_status: AtomicUsize::new(0),
+            cache_enabled: AtomicBool::new(true),
             extension_stats: ArcSwap::new(Arc::new(Vec::new())),
             scan_stats: TraversalStats::default(),
         }
